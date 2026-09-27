@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Settings - Research Assistant{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+{% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
+{% if reembed %}
+<p class="error" role="alert">Embedding mode changed. All documents must be
+re-embedded before search works again: local mode costs nothing but takes
+CPU time; openrouter mode costs a few dollars.</p>
+{% endif %}
+<form method="post">
+  <fieldset>
+    <legend>Embedding</legend>
+    <p>Embedding converts text to numbers for meaning-based search.</p>
+    <label>
+      <input type="radio" name="embedding_mode" value="local"
+             {% if settings.embedding_mode == "local" %}checked{% endif %}>
+      Local - free and private, slower (recommended)
+    </label>
+    <label>
+      <input type="radio" name="embedding_mode" value="openrouter"
+             {% if settings.embedding_mode == "openrouter" %}checked{% endif %}>
+      OpenRouter - a few dollars one-time, best quality
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Answering</legend>
+    <label for="openrouter_key">OpenRouter API key</label>
+    <input type="password" id="openrouter_key" name="openrouter_key"
+           value="" autocomplete="new-password"
+           aria-describedby="key-help"
+           placeholder="{% if key_set %}A key is saved - type to replace it{% else %}Paste your key here{% endif %}">
+    <p id="key-help">
+      {% if key_set %}
+      A key is saved. It is hidden and never shown again. Leave this box
+      empty to keep the saved key.
+      {% else %}
+      No key saved yet. Get one at openrouter.ai, then paste it here and
+      press Save. It is stored only on this computer and is never shown
+      on screen again.
+      {% endif %}
+    </p>
+    <label for="chat_model">Chat model (OpenRouter model name)</label>
+    <input type="text" id="chat_model" name="chat_model"
+           value="{{ settings.chat_model }}" list="model-options"
+           aria-describedby="model-help">
+    <datalist id="model-options">
+      <option value="nvidia/nemotron-3-super-120b-a12b:free">Fast, short answers, cites sources</option>
+      <option value="nvidia/nemotron-3-ultra-550b-a55b:free">Slower, longer, more thorough</option>
+      <option value="nvidia/nemotron-3.5-lightning:free">Very long context, thinks out loud</option>
+    </datalist>
+    <p id="model-help">
+      All three suggestions above are free and were tested working with
+      this app. The first is the fastest. The last one tends to think out
+      loud before answering, which sounds long when read aloud.
+    </p>
+    <label>
+      <input type="checkbox" name="web_search"
+             {% if settings.web_search %}checked{% endif %}>
+      Web search - let the model look things up online
+    </label>
+    <p>Web search works with the free models listed above. It adds
+    outside information to an answer, so turn it off when you only want
+    what is in your own documents.</p>
+    <label>
+      <input type="checkbox" name="rerank" {% if settings.rerank %}checked{% endif %}>
+      Rerank - re-sort search results for better accuracy
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Maintenance</legend>
+    <label>
+      <input type="checkbox" name="rescan_timer"
+             {% if settings.rescan_timer %}checked{% endif %}>
+      Daily rescan - check the folders for new documents every day
+    </label>
+    <label>
+      <input type="checkbox" name="verbose" {% if settings.verbose %}checked{% endif %}>
+      Verbose logging - write detailed lines to the debug log
+    </label>
+  </fieldset>
+
+  <button type="submit">Save settings</button>
+</form>
+{% endblock %}

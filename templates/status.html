@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Index status - Research Assistant{% endblock %}
+{% block content %}
+<h2>Index status</h2>
+{% if index_ready %}
+<p role="status">Index ready: {{ stats.files }} files, {{ stats.chunks }} passages,
+{{ stats.vectors }} embeddings.</p>
+{% else %}
+<p role="status">Index is empty. Run a scan to build it.</p>
+{% endif %}
+<form method="post" action="{{ url_for('scan') }}">
+  <button type="submit">Scan now</button>
+</form>
+{% if scan_result %}
+<p class="notice" role="status">{{ scan_result }}</p>
+{% endif %}
+<h3>Folders to index</h3>
+<ul>
+  {% for folder in folders %}
+  <li>{{ folder.path }} - {{ "found" if folder.exists else "missing" }}</li>
+  {% endfor %}
+</ul>
+{% if file_counts %}
+<h3>Files by state</h3>
+<ul>
+  {% for state, count in file_counts.items() %}
+  <li>{{ state }}: {{ count }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+<h3>Embedding</h3>
+<p>Mode: {{ settings.embedding_mode }} (switch in Settings).</p>
+{% endblock %}
