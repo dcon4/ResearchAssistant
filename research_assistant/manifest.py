@@ -6,8 +6,8 @@ from pathlib import Path
 from research_assistant import logger
 from research_assistant.config import INDEX_DIR, INDEX_FOLDERS
 
-SUPPORTED = {".pdf", ".epub", ".html", ".htm", ".txt", ".md"}
-SKIP = {".zip"}
+SUPPORTED = {".pdf", ".epub", ".html", ".htm", ".txt", ".md", ".zip"}
+SKIP: set[str] = set()
 
 
 @dataclass

@@ -6,9 +6,13 @@ questions your documents cannot answer.
 
 ## What it does
 
-- Reads documents (PDF, EPUB, TXT, HTML) from three folders on your
-  NAS share: `opencode/Ebooks`, `opencode/Documents`, `opencode/reports`
-  (including new subfolders).
+- Reads documents (PDF, EPUB, TXT, HTML, Markdown) from three folders on
+  your NAS share: `opencode/Ebooks`, `opencode/Documents`,
+  `opencode/reports` (including new subfolders).
+- ZIP archives are read as well. Every document inside is indexed, and
+  an answer names both the archive and the file within it, for example
+  `bundle.zip - notes/summary.txt`. A zip inside a zip is left alone,
+  and one file cannot be larger than 60 MB.
 - Builds a searchable index on this computer's hard drive. The
   documents themselves are never moved or copied.
 - Answers your questions with an AI model from OpenRouter, listing

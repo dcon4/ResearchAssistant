@@ -1,6 +1,8 @@
 import html
+import io
 import re
 import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +11,11 @@ from research_assistant import logger
 
 PDF_PAGE_BATCH = 200
 MAX_HTML_ENTRY = 20 * 1024 * 1024
+MAX_ZIP_MEMBER = 60 * 1024 * 1024
+MAX_ZIP_TOTAL = 400 * 1024 * 1024
+MAX_ZIP_MEMBERS = 500
+ZIP_INNER = (".txt", ".md", ".html", ".htm", ".epub", ".pdf")
+ZIP_JUNK = ("__MACOSX", ".DS_Store")
 TAG_RE = re.compile(r"<[^>]+>")
 SCRIPT_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 BLANK_RE = re.compile(r"\n{3,}")
@@ -44,24 +51,49 @@ def _from_soup(markup: str) -> str:
         return _strip_tags(markup)
 
 
-def extract_txt(path: Path) -> list[Piece]:
-    data = path.read_bytes()
+def _decode_bytes(data: bytes) -> str:
     try:
-        text = data.decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError:
-        text = data.decode("latin-1", errors="replace")
-    text = _clean(text)
+        return data.decode("latin-1", errors="replace")
+
+
+def _text_from_bytes(data: bytes) -> str:
+    return _clean(_decode_bytes(data))
+
+
+def _html_from_bytes(raw: bytes) -> str:
+    markup = _decode_bytes(raw)
+    if len(raw) > MAX_HTML_ENTRY:
+        return _clean(_strip_tags(markup))
+    try:
+        import html2text
+
+        converter = html2text.HTML2Text()
+        converter.ignore_images = True
+        converter.body_width = 0
+        return _clean(converter.handle(markup))
+    except Exception:
+        return _clean(_from_soup(markup))
+
+
+def _title_of(markup: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", markup, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return _clean(_strip_tags(match.group(1)))[:120]
+
+
+def extract_txt(path: Path) -> list[Piece]:
+    text = _text_from_bytes(path.read_bytes())
     if not text:
         return []
     return [Piece(text=text, location="full text")]
 
 
 def extract_html(path: Path) -> list[Piece]:
-    data = path.read_bytes()
-    try:
-        markup = data.decode("utf-8")
-    except UnicodeDecodeError:
-        markup = data.decode("latin-1", errors="replace")
+    raw = path.read_bytes()
+    markup = _decode_bytes(raw)
     try:
         import html2text
 
@@ -74,11 +106,7 @@ def extract_html(path: Path) -> list[Piece]:
     text = _clean(text)
     if not text:
         return []
-    title = ""
-    match = re.search(r"<title[^>]*>(.*?)</title>", markup, re.IGNORECASE | re.DOTALL)
-    if match:
-        title = _clean(_strip_tags(match.group(1)))[:120]
-    return [Piece(text=text, location=title or "full text")]
+    return [Piece(text=text, location=_title_of(markup) or "full text")]
 
 
 def _epub_spine(zfile: zipfile.ZipFile) -> list[tuple[str, str]]:
@@ -112,31 +140,30 @@ def _epub_spine(zfile: zipfile.ZipFile) -> list[tuple[str, str]]:
         ]
 
 
-def extract_epub(path: Path) -> list[Piece]:
+def _epub_pieces(zfile: zipfile.ZipFile) -> list[Piece]:
     pieces: list[Piece] = []
-    with zipfile.ZipFile(path) as zfile:
-        for index, (_key, name) in enumerate(_epub_spine(zfile), start=1):
-            try:
-                raw = zfile.read(name)
-            except KeyError:
-                continue
-            markup = raw.decode("utf-8", errors="replace")
-            if len(raw) > MAX_HTML_ENTRY:
-                text = _strip_tags(markup)
-            else:
-                text = _from_soup(markup)
-            text = _clean(text)
-            if not text:
-                continue
-            title = ""
-            match = re.search(
-                r"<title[^>]*>(.*?)</title>", markup, re.IGNORECASE | re.DOTALL
-            )
-            if match:
-                title = _clean(_strip_tags(match.group(1)))[:120]
-            location = title or f"chapter {index}"
-            pieces.append(Piece(text=text, location=location))
+    for index, (_key, name) in enumerate(_epub_spine(zfile), start=1):
+        try:
+            raw = zfile.read(name)
+        except KeyError:
+            continue
+        markup = _decode_bytes(raw)
+        if len(raw) > MAX_HTML_ENTRY:
+            text = _strip_tags(markup)
+        else:
+            text = _from_soup(markup)
+        text = _clean(text)
+        if not text:
+            continue
+        pieces.append(
+            Piece(text=text, location=_title_of(markup) or f"chapter {index}")
+        )
     return pieces
+
+
+def extract_epub(path: Path) -> list[Piece]:
+    with zipfile.ZipFile(path) as zfile:
+        return _epub_pieces(zfile)
 
 
 def extract_pdf(path: Path) -> list[Piece]:
@@ -176,6 +203,92 @@ def extract_pdf(path: Path) -> list[Piece]:
     return pieces
 
 
+def _pdf_pieces_from_bytes(name: str, raw: bytes) -> list[Piece]:
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+        handle.write(raw)
+        temp_path = Path(handle.name)
+    try:
+        return [
+            Piece(text=piece.text, location=f"{name}, {piece.location}")
+            for piece in extract_pdf(temp_path)
+        ]
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _zip_member_pieces(name: str, suffix: str, raw: bytes) -> list[Piece]:
+    if suffix in (".txt", ".md", ".html", ".htm"):
+        if suffix in (".txt", ".md"):
+            text = _text_from_bytes(raw)
+        else:
+            text = _html_from_bytes(raw)
+        if not text:
+            return []
+        return [Piece(text=text, location=name)]
+    if suffix == ".epub":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as inner:
+                return [
+                    Piece(text=piece.text, location=f"{name}, {piece.location}")
+                    for piece in _epub_pieces(inner)
+                ]
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"{name}: not a readable epub ({exc})") from exc
+    if suffix == ".pdf":
+        return _pdf_pieces_from_bytes(name, raw)
+    return []
+
+
+def extract_zip(path: Path) -> list[Piece]:
+    try:
+        zfile = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"not a readable zip: {exc}") from exc
+    pieces: list[Piece] = []
+    total = 0
+    kept = 0
+    logged_nested = False
+    with zfile:
+        for info in zfile.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/")
+            if any(part in ZIP_JUNK for part in Path(name).parts):
+                continue
+            suffix = Path(name).suffix.lower()
+            if suffix == ".zip":
+                if not logged_nested:
+                    logger.log("Zip", f"{path.name}: nested zip skipped: {name}")
+                    logged_nested = True
+                continue
+            if suffix not in ZIP_INNER:
+                continue
+            if kept >= MAX_ZIP_MEMBERS:
+                logger.log("Zip", f"{path.name}: stopped at {MAX_ZIP_MEMBERS} files")
+                break
+            if info.file_size > MAX_ZIP_MEMBER:
+                logger.log("Zip", f"{path.name}: {name} is too large, skipped")
+                continue
+            if total + info.file_size > MAX_ZIP_TOTAL:
+                logger.log("Zip", f"{path.name}: size limit reached, skipping {name}")
+                continue
+            try:
+                raw = zfile.read(info)
+            except Exception as exc:
+                logger.log("Zip", f"{path.name}: cannot read {name}: {exc}")
+                continue
+            total += len(raw)
+            kept += 1
+            try:
+                pieces.extend(_zip_member_pieces(name, suffix, raw))
+            except Exception as exc:
+                logger.log("Zip", f"{path.name}: {name} failed: {exc}")
+    if not pieces:
+        raise ValueError("no extractable text in any zip file")
+    logger.verbose("Zip", f"{path.name}: kept {kept} files, {len(pieces)} sections")
+    return pieces
+
+
 def extract(path: Path) -> list[Piece]:
     suffix = path.suffix.lower()
     if suffix == ".txt":
@@ -188,4 +301,6 @@ def extract(path: Path) -> list[Piece]:
         return extract_epub(path)
     if suffix == ".pdf":
         return extract_pdf(path)
+    if suffix == ".zip":
+        return extract_zip(path)
     raise ValueError(f"unsupported type: {suffix}")

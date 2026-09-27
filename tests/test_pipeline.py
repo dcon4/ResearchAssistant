@@ -1,4 +1,5 @@
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -92,7 +93,7 @@ def test_scan_indexes_supported_files_only(tmp_path, monkeypatch, isolated_index
     folder = tmp_path / "docs"
     folder.mkdir()
     (folder / "a.txt").write_text("alpha content", encoding="utf-8")
-    (folder / "b.zip").write_bytes(b"PK")
+    (folder / "b.7z").write_bytes(b"7z")
     (folder / "c.sh").write_text("#!/bin/sh", encoding="utf-8")
     monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
 
@@ -392,3 +393,147 @@ def test_cited_numbers_never_exceed_source_count():
         out = _normalize_citations(text, 3)
         for number in range(4, 11):
             assert f"[{number}]" not in out, f"{text} -> {out}"
+
+
+def _mini_epub_bytes() -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container><rootfiles>'
+            '<rootfile full-path="OEBPS/content.opf"/>'
+            "</rootfiles></container>",
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package><manifest>'
+            '<item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>'
+            "</manifest>"
+            '<spine><itemref idref="c1"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/chapter1.xhtml",
+            "<html><head><title>First Chapter</title></head>"
+            "<body><p>A journey begins.</p></body></html>",
+        )
+    return buffer.getvalue()
+
+
+def test_extract_zip_members(tmp_path):
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("notes/alpha.txt", "Alpha notes about testing.")
+        archive.writestr("notes/beta.md", "# Beta\n\nBeta body text.")
+        archive.writestr(
+            "pages/gamma.html",
+            "<html><head><title>Gamma</title></head>"
+            "<body><p>Gamma words here.</p></body></html>",
+        )
+        archive.writestr("image.png", b"\x89PNG-not-text")
+        archive.writestr("junk.7z", b"7z")
+    pieces = extract(path)
+    locations = sorted(piece.location for piece in pieces)
+    assert locations == ["notes/alpha.txt", "notes/beta.md", "pages/gamma.html"]
+    joined = " ".join(piece.text for piece in pieces)
+    assert "Alpha notes" in joined
+    assert "Beta body text" in joined
+    assert "Gamma words" in joined
+
+
+def test_extract_zip_skips_nested_zip_and_junk(tmp_path):
+    path = tmp_path / "outer.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("__MACOSX/alpha.txt", "mac resource fork noise")
+        archive.writestr(".DS_Store", "junk")
+        archive.writestr("inner.zip", b"PK\x03\x04 not really a zip")
+        archive.writestr("real.txt", "the one real file")
+    pieces = extract(path)
+    assert len(pieces) == 1
+    assert pieces[0].location == "real.txt"
+    assert "the one real file" in pieces[0].text
+
+
+def test_extract_zip_epub_member_keeps_chapter_location(tmp_path):
+    path = tmp_path / "books.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("library/mini.epub", _mini_epub_bytes())
+    pieces = extract(path)
+    assert len(pieces) == 1
+    assert pieces[0].location == "library/mini.epub, First Chapter"
+    assert "journey begins" in pieces[0].text
+
+
+def test_extract_zip_pdf_member_uses_pdf_extractor(tmp_path, monkeypatch):
+    import research_assistant.extract as extract_mod
+
+    seen = {}
+
+    def fake_pdf(path):
+        seen["path"] = Path(path).suffix
+        return [extract_mod.Piece(text="pdf body text", location="pages 1-2")]
+
+    monkeypatch.setattr(extract_mod, "extract_pdf", fake_pdf)
+    path = tmp_path / "docs.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("report.pdf", b"%PDF-1.4 fake")
+    pieces = extract(path)
+    assert seen["path"] == ".pdf"
+    assert pieces[0].location == "report.pdf, pages 1-2"
+    assert pieces[0].text == "pdf body text"
+
+
+def test_extract_zip_rejects_unreadable_archive(tmp_path):
+    path = tmp_path / "broken.zip"
+    path.write_bytes(b"PK not a real zip file at all")
+    with pytest.raises(ValueError, match="not a readable zip"):
+        extract(path)
+
+
+def test_extract_zip_skips_oversized_member(tmp_path, monkeypatch):
+    import research_assistant.extract as extract_mod
+
+    monkeypatch.setattr(extract_mod, "MAX_ZIP_MEMBER", 8)
+    path = tmp_path / "guarded.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("huge.txt", "x" * 500)
+        archive.writestr("tiny.txt", "tiny")
+    pieces = extract(path)
+    assert len(pieces) == 1
+    assert pieces[0].text == "tiny"
+
+
+def test_zip_files_are_scanned_not_skipped(tmp_path, monkeypatch, isolated_index):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with zipfile.ZipFile(folder / "bundle.zip", "w") as archive:
+        archive.writestr("a.txt", "content")
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+
+    summary = manifest.scan()
+    assert summary["new"] == 1
+    assert summary["skipped"] == 0
+    assert manifest.counts()["new"] == 1
+
+
+def test_index_zip_produces_chunks_with_member_locations(
+    tmp_path, monkeypatch, isolated_index
+):
+    from research_assistant import pipeline
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    zip_path = folder / "bundle.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("chapter-one.txt", "First chapter text about the topic.")
+        archive.writestr("chapter-two.txt", "Second chapter text about the topic.")
+    conn = store.connect()
+    count = pipeline.index_file(conn, str(zip_path))
+    assert count > 0
+    rows = conn.execute(
+        "SELECT location FROM chunks WHERE file_path = ?", (str(zip_path),)
+    ).fetchall()
+    locations = sorted({row[0] for row in rows})
+    assert locations == ["chapter-one.txt", "chapter-two.txt"]
+    conn.close()
