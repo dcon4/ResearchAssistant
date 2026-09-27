@@ -537,3 +537,117 @@ def test_index_zip_produces_chunks_with_member_locations(
     locations = sorted({row[0] for row in rows})
     assert locations == ["chapter-one.txt", "chapter-two.txt"]
     conn.close()
+
+
+def _api_client(tmp_path, monkeypatch):
+    from research_assistant import config, embed, store
+    from research_assistant.webui import app
+
+    index_dir = tmp_path / "index"
+    monkeypatch.setattr(config, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(store, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(manifest, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(embed, "PROJECT_DIR", tmp_path)
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_api_status_reports_index_state(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    response = client.get("/api/status")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["ok"] is True
+    assert data["index_ready"] is False
+    assert data["chunks"] == 0
+    assert isinstance(data["model"], str)
+    assert isinstance(data["folders"], list)
+    assert "application/json" in response.content_type
+
+
+def test_api_status_never_exposes_the_api_key(tmp_path, monkeypatch):
+    from research_assistant import config, embed
+
+    monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(embed, "PROJECT_DIR", tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    embed.set_api_key("sk-or-super-secret-value")
+    client = _api_client(tmp_path, monkeypatch)
+    data = client.get("/api/status").get_json()
+    assert "sk-or-super-secret-value" not in str(data)
+
+
+def test_api_ask_rejects_an_empty_question(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    assert client.post("/api/ask", json={"question": "   "}).status_code == 400
+    assert client.post("/api/ask").status_code == 400
+
+
+def test_api_ask_passes_the_chosen_model(tmp_path, monkeypatch):
+    from research_assistant import answer
+
+    seen = {}
+
+    def fake_ask(question, model=None):
+        seen["model"] = model
+        return {
+            "question": question,
+            "answer": "Answer [1].",
+            "model": model or "default-model",
+            "sources": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+
+    data = client.post(
+        "/api/ask",
+        json={
+            "question": "what is it",
+            "model": "nvidia/nemotron-3-super-120b-a12b:free",
+        },
+    ).get_json()
+    assert seen["model"] == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert data["model"] == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert data["ok"] is True
+
+    data = client.post("/api/ask", json={"question": "and without a model"}).get_json()
+    assert seen["model"] is None
+    assert data["model"] == "default-model"
+
+
+def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    source = Source(
+        file_path="/mnt/ls-share/opencode/Ebooks/notes/summary.txt",
+        location="notes/summary.txt",
+        text="body",
+        score=0.5,
+        stage="bm25",
+    )
+
+    def fake_ask(question, model=None):
+        return {
+            "question": question,
+            "answer": "Answer [1].",
+            "model": "m",
+            "sources": [source],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+    data = client.post("/api/ask", json={"question": "q"}).get_json()
+    assert data["sources"] == [
+        {
+            "file": "/mnt/ls-share/opencode/Ebooks/notes/summary.txt",
+            "folder": "Ebooks",
+            "location": "notes/summary.txt",
+            "score": 0.5,
+        }
+    ]

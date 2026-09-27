@@ -48,12 +48,14 @@ def _build_user_prompt(question: str, sources: list[Source]) -> str:
     return "\n".join(lines)
 
 
-def ask(question: str) -> dict:
+def ask(question: str, model: str | None = None) -> dict:
     settings = load_settings()
+    model_id = (model or "").strip() or settings["chat_model"]
     sources = search(question, limit=8)
     result: dict = {
         "question": question,
         "answer": None,
+        "model": model_id,
         "sources": sources,
         "error": None,
     }
@@ -77,7 +79,7 @@ def ask(question: str) -> dict:
         import requests
 
         payload = {
-            "model": settings["chat_model"],
+            "model": model_id,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": _build_user_prompt(question, sources)},
@@ -108,8 +110,7 @@ def ask(question: str) -> dict:
         )
         logger.log(
             "Answer",
-            f"Answer produced ({len(result['answer'])} chars, "
-            f"model {settings['chat_model']})",
+            f"Answer produced ({len(result['answer'])} chars, model {model_id})",
         )
     except Exception as exc:
         result["error"] = f"The model could not answer: {exc}"

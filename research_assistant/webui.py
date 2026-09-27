@@ -4,6 +4,7 @@ from pathlib import Path
 from flask import (
     Flask,
     abort,
+    jsonify,
     render_template,
     request,
     send_file,
@@ -93,6 +94,67 @@ def _index_stats() -> dict:
     except Exception as exc:
         logger.log("WebUI", f"Cannot read index stats: {exc}")
         return {"chunks": 0, "files": 0, "vectors": 0}
+
+
+def _folder_name(path: str) -> str:
+    target = Path(path)
+    for root in INDEX_FOLDERS:
+        try:
+            if target.is_relative_to(root):
+                return root.name
+        except (OSError, ValueError):
+            continue
+    return target.parent.name
+
+
+@app.route("/api/status")
+def api_status():
+    stats = _index_stats()
+    settings = load_settings()
+    return jsonify(
+        {
+            "ok": True,
+            "index_ready": stats.get("chunks", 0) > 0,
+            "chunks": stats.get("chunks", 0),
+            "files": stats.get("files", 0),
+            "vectors": stats.get("vectors", 0),
+            "model": settings["chat_model"],
+            "web_search": bool(settings.get("web_search")),
+            "folders": [str(p) for p in INDEX_FOLDERS],
+        }
+    )
+
+
+@app.route("/api/ask", methods=["POST"])
+def api_ask():
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"ok": False, "error": "Please send a question."}), 400
+    model = str(data.get("model") or "").strip() or None
+    logger.log("WebUI", f"API question received: {question[:120]}")
+    from research_assistant.answer import ask as answer_ask
+
+    result = answer_ask(question, model=model)
+    sources = [
+        {
+            "file": source.file_path,
+            "folder": _folder_name(source.file_path),
+            "location": source.location,
+            "score": round(source.score, 4),
+        }
+        for source in result["sources"]
+    ]
+    return jsonify(
+        {
+            "ok": result["error"] is None,
+            "question": result["question"],
+            "answer": result["answer"],
+            "model": result["model"],
+            "sources": sources,
+            "error": result["error"],
+        }
+    )
 
 
 @app.route("/")
