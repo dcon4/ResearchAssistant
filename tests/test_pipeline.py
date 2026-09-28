@@ -119,6 +119,70 @@ def test_manifest_counts(tmp_path, monkeypatch, isolated_index):
     assert manifest.counts()["new"] == 1
 
 
+def test_skip_files_are_recorded_and_never_pending(
+    tmp_path, monkeypatch, isolated_index
+):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "keep.txt").write_text("keep this", encoding="utf-8")
+    (folder / "Futile_Work (3).epub").write_text("copy one", encoding="utf-8")
+    (folder / "Futile_Work (4).epub").write_text("copy two", encoding="utf-8")
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+
+    summary = manifest.scan()
+
+    assert summary["skipped"] == 2
+    assert manifest.counts()["skipped"] == 2
+    assert manifest.skipped_files() == [
+        str(folder / "Futile_Work (3).epub"),
+        str(folder / "Futile_Work (4).epub"),
+    ]
+    assert [record.path for record in manifest.pending()] == [str(folder / "keep.txt")]
+
+    again = manifest.scan()
+    assert again["skipped"] == 2
+    assert again["unchanged"] == 1
+
+
+def test_rescan_drops_chunks_for_newly_skipped_file(
+    tmp_path, monkeypatch, isolated_index
+):
+    from research_assistant import config, pipeline
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "keep.txt").write_text(
+        "These are words worth finding in the search index. " * 20, encoding="utf-8"
+    )
+    (folder / "dupe.txt").write_text(
+        "These are words worth dropping from the index. " * 20, encoding="utf-8"
+    )
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"rescan_timer": false}', encoding="utf-8")
+
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(pipeline, "INDEX_DIR", tmp_path / "index")
+
+    def indexed_files() -> set[str]:
+        conn = store.connect()
+        paths = {
+            row[0].split("/")[-1]
+            for row in conn.execute("SELECT DISTINCT file_path FROM chunks")
+        }
+        conn.close()
+        return paths
+
+    assert pipeline.rescan()["indexed"] == 2
+    assert indexed_files() == {"keep.txt", "dupe.txt"}
+
+    monkeypatch.setattr(manifest, "SKIP_FILES", {"dupe.txt"})
+    pipeline.rescan()
+
+    assert manifest.counts()["skipped"] == 1
+    assert indexed_files() == {"keep.txt"}
+
+
 def test_fts_roundtrip(isolated_index, tmp_path):
     conn = store.connect()
     ids = store.insert_chunks(
@@ -174,7 +238,7 @@ def test_answer_without_api_key_returns_passages(isolated_index, tmp_path, monke
     from research_assistant import answer
     from research_assistant.answer import ask
 
-    monkeypatch.setattr(answer, "api_key", lambda: None)
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: None)
     conn = store.connect()
     store.insert_chunks(
         conn,
@@ -336,12 +400,12 @@ def test_settings_page_never_echoes_saved_key(tmp_path, monkeypatch):
     assert page.status_code == 200
     assert b"sk-or-super-secret-value" not in page.data
     assert b"A key is saved" in page.data
-    assert b'name="openrouter_key"' in page.data
+    assert b'name="provider_key"' in page.data
     assert b'type="password"' in page.data
 
     saved = client.post(
         "/settings",
-        data={"verbose": "on", "embedding_mode": "local", "openrouter_key": ""},
+        data={"verbose": "on", "embedding_mode": "local", "provider_key": ""},
         follow_redirects=True,
     )
     assert b"sk-or-super-secret-value" not in saved.data
@@ -364,7 +428,7 @@ def test_saving_key_via_settings_writes_env(tmp_path, monkeypatch):
         data={
             "verbose": "on",
             "embedding_mode": "local",
-            "openrouter_key": "sk-or-from-form-abc",
+            "provider_key": "sk-or-from-form-abc",
         },
         follow_redirects=True,
     )
@@ -672,22 +736,116 @@ def test_doc_title_reads_like_a_name_the_user_recognises():
     assert _doc_title("/mnt/x/Ebooks/book.epub", "Chapter One") == "book"
 
 
-def test_answer_lists_each_document_once():
+def test_answer_keeps_several_passages_per_document():
     from research_assistant import answer
     from research_assistant.search import Source
 
-    def fake_search(question, limit=8):
+    def make(name, count):
         return [
-            Source("/x/Ebooks/plan.txt", "full text", "a", 1.0, "keyword"),
-            Source("/x/Ebooks/plan.txt", "full text", "b", 0.9, "keyword"),
-            Source("/x/Ebooks/report.txt", "full text", "c", 0.8, "keyword"),
-            Source("/x/Ebooks/report.txt", "full text", "d", 0.7, "keyword"),
-            Source("/x/Ebooks/notes.txt", "full text", "e", 0.6, "keyword"),
+            Source(
+                f"/x/Ebooks/{name}",
+                "full text",
+                f"{name}-{i}",
+                1.0 - i * 0.01,
+                "keyword",
+            )
+            for i in range(count)
         ]
 
-    kept = answer._distinct_documents(fake_search("q"), limit=8)
-    assert [source.text for source in kept] == ["a", "c", "e"]
-    assert len(answer._distinct_documents(fake_search("q"), limit=2)) == 2
+    kept = answer._select_sources(make("plan.txt", 6) + make("report.txt", 3))
+
+    assert [source.text for source in kept[:4]] == [f"plan.txt-{i}" for i in range(4)]
+    assert sum(1 for s in kept if s.file_path.endswith("plan.txt")) == 4
+    assert sum(1 for s in kept if s.file_path.endswith("report.txt")) == 3
+
+
+def test_selection_caps_documents_and_total():
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    many_docs = [
+        Source(f"/x/Ebooks/{i}.txt", "full text", "p", 1.0, "keyword")
+        for i in range(20)
+    ]
+    assert len(answer._select_sources(many_docs)) == answer.MAX_DOCUMENTS
+
+    deep_docs = [
+        Source(f"/x/Ebooks/{i}.txt", "full text", f"p{i}-{j}", 1.0, "keyword")
+        for i in range(10)
+        for j in range(10)
+    ]
+    assert len(answer._select_sources(deep_docs)) == answer.MAX_PASSAGES
+
+
+def test_extract_letter_hint():
+    from research_assistant.search import extract_letter_hint
+
+    assert extract_letter_hint("a drug that starts with the letter v") == "v"
+    assert extract_letter_hint("it begins with the letter V") == "v"
+    assert extract_letter_hint("starting with character b") == "b"
+    assert extract_letter_hint("it starts with 'Q'") == "q"
+    assert extract_letter_hint("starts with a drug") is None
+    assert extract_letter_hint("begins with a") is None
+    assert extract_letter_hint("what does the book say about it") is None
+
+
+def test_rarity_bonus_prefers_a_rare_matching_word(isolated_index):
+    from research_assistant.search import _rarity_bonus
+
+    conn = store.connect()
+    common_ids = store.insert_chunks(
+        conn,
+        "/x/common.txt",
+        [(f"p{i}", "A very common idea about very ordinary things.") for i in range(6)],
+    )
+    rare_ids = store.insert_chunks(
+        conn, "/x/rare.txt", [("r1", "The Vioxx recall hurt patients.")]
+    )
+    plain_ids = store.insert_chunks(
+        conn, "/x/plain.txt", [("n1", "The fish swam past the boat.")]
+    )
+    conn.commit()
+    all_ids = list(common_ids) + list(rare_ids) + list(plain_ids)
+    rows = store.fetch_chunks(conn, all_ids)
+    bonus = _rarity_bonus(
+        conn, {chunk_id: row[2] for chunk_id, row in rows.items()}, "v"
+    )
+
+    assert bonus[rare_ids[0]] > bonus[common_ids[0]]
+    assert bonus[plain_ids[0]] == 0.0
+    conn.close()
+
+
+def test_content_terms_drop_filler_and_hint_words():
+    from research_assistant.search import _content_terms
+
+    terms = _content_terms(
+        "there was a drug that damaged hearts that starts with the letter v"
+    )
+    assert "drug" in terms
+    assert "hearts" in terms
+    assert "starts" not in terms
+    assert "letter" not in terms
+    assert "that" not in terms
+
+
+def test_selection_gives_lane_passages_the_first_slots():
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    by_score_first = [
+        Source(f"/x/Ebooks/u{doc}.txt", f"page {i}", f"u{doc}-{i}", 1.0, "keyword")
+        for doc in range(8)
+        for i in range(4)
+    ]
+    lane_sources = [
+        Source(f"/x/Ebooks/t{i}.txt", "full text", f"t{i}", 0.5, "keyword+vector", True)
+        for i in range(4)
+    ]
+    kept = answer._select_sources(by_score_first + lane_sources)
+
+    assert [source.text for source in kept[:4]] == ["t0", "t1", "t2", "t3"]
+    assert len(kept) == answer.MAX_PASSAGES
 
 
 def test_documents_inside_one_zip_count_separately():
@@ -828,3 +986,211 @@ def test_api_accepts_history_and_returns_what_it_kept(tmp_path, monkeypatch):
         "/api/ask", json={"question": "x", "history": "not a list"}
     ).get_json()
     assert data["history"] == []
+
+
+def test_transient_model_errors_are_detected():
+    from research_assistant.answer import _is_transient
+
+    assert _is_transient({"code": 503, "message": "boom"})
+    assert _is_transient(
+        {"message": "Upstream error from Nvidia: Service temporarily overloaded"}
+    )
+    assert _is_transient("rate limit exceeded")
+    assert not _is_transient(
+        {
+            "code": 429,
+            "message": "Rate limit exceeded: free-models-per-day. "
+            "Add 5 credits to unlock 1000 free model requests per day",
+        }
+    )
+    assert not _is_transient({"message": "context window too large"})
+    assert not _is_transient("model does not support this image type")
+
+
+def test_ask_retries_when_the_model_service_is_busy(isolated_index, monkeypatch):
+    from research_assistant import answer
+
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
+    monkeypatch.setattr(answer, "RETRY_DELAYS", (0, 0))
+    conn = store.connect()
+    store.insert_chunks(conn, "/x/doc.txt", [("p1", "Vioxx damaged hearts")])
+    conn.commit()
+    conn.close()
+
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self.text = ""
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, **kwargs):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return FakeResponse(
+                {"error": {"code": 503, "message": "temporarily overloaded"}}
+            )
+        return FakeResponse(
+            {"choices": [{"message": {"content": "Vioxx damaged hearts [1]"}}]}
+        )
+
+    monkeypatch.setattr("requests.post", fake_post)
+    result = answer.ask("what drug damaged hearts")
+
+    assert result["error"] is None
+    assert "Vioxx" in result["answer"]
+    assert calls["count"] == 3
+
+
+def test_provider_registry_is_complete():
+    from research_assistant.providers import PROVIDER_ORDER, PROVIDERS, get_provider
+
+    assert set(PROVIDERS) == set(PROVIDER_ORDER)
+    envs = []
+    for provider_id in PROVIDER_ORDER:
+        provider = PROVIDERS[provider_id]
+        assert provider["url"].startswith("https://")
+        assert provider["label"]
+        assert provider["site"]
+        assert provider["env"].endswith("_API_KEY")
+        assert provider["models"]
+        model_ids = {model["id"] for model in provider["models"]}
+        assert provider["default_model"] in model_ids
+        envs.append(provider["env"])
+    assert len(set(envs)) == len(envs)
+    assert get_provider("does-not-exist")["id"] == "openrouter"
+    assert get_provider(None)["id"] == "openrouter"
+
+
+def test_every_model_suggestion_says_whether_it_is_free():
+    from research_assistant.providers import all_models
+
+    models = all_models()
+    assert len(models) >= 15
+    for model in models:
+        assert model["id"]
+        assert model["label"]
+        assert isinstance(model["free"], bool)
+    zen_free = [model for model in models if model["id"].endswith("-free")]
+    assert zen_free
+    assert all(model["free"] for model in zen_free)
+    assert any(model["free"] for model in models)
+    assert any(not model["free"] for model in models)
+
+
+def test_settings_offers_provider_choice_and_free_filter(tmp_path, monkeypatch):
+    from research_assistant import config
+    from research_assistant.webui import app
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    app.config["TESTING"] = True
+    page = app.test_client().get("/settings")
+
+    assert page.status_code == 200
+    assert b'name="chat_provider"' in page.data
+    assert b'value="groq"' in page.data
+    assert b'value="zen"' in page.data
+    assert b'id="free-only"' in page.data
+    assert b'data-free="yes"' in page.data
+    assert b'data-free="no"' in page.data
+    assert b'name="provider_key"' in page.data
+
+
+def test_switching_provider_keeps_its_own_model_name(tmp_path, monkeypatch):
+    from research_assistant import config
+    from research_assistant.webui import app
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    app.config["TESTING"] = True
+    client = app.test_client()
+    base = {"verbose": "on", "embedding_mode": "local"}
+
+    client.post(
+        "/settings",
+        data={**base, "chat_provider": "groq", "chat_model": "llama-3.3-70b-versatile"},
+    )
+    settings = config.load_settings()
+    assert settings["chat_provider"] == "groq"
+    assert settings["chat_model"] == "llama-3.3-70b-versatile"
+
+    client.post(
+        "/settings",
+        data={
+            **base,
+            "chat_provider": "openrouter",
+            "chat_model": "llama-3.3-70b-versatile",
+        },
+    )
+    settings = config.load_settings()
+    assert settings["chat_provider"] == "openrouter"
+    assert settings["chat_models"]["groq"] == "llama-3.3-70b-versatile"
+    assert settings["chat_model"] != "llama-3.3-70b-versatile"
+
+
+def test_keys_are_kept_separately_for_each_provider(tmp_path, monkeypatch):
+    from research_assistant import config, embed
+
+    monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(embed, "PROJECT_DIR", tmp_path)
+    for name in ("OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    embed.set_api_key("openrouter-key-111")
+    embed.set_api_key("groq-key-222", "groq")
+    embed.set_api_key("zen-key-333", "zen")
+
+    assert embed.api_key("openrouter") == "openrouter-key-111"
+    assert embed.api_key("groq") == "groq-key-222"
+    assert embed.api_key("zen") == "zen-key-333"
+    assert embed.api_key("nim") is None
+    assert embed.has_api_key("nim") is False
+
+    text = (tmp_path / ".env").read_text()
+    assert text.count("OPENROUTER_API_KEY=") == 1
+    assert text.count("GROQ_API_KEY=") == 1
+    assert text.count("OPENCODE_API_KEY=") == 1
+
+
+def test_answer_posts_to_the_selected_provider(isolated_index, monkeypatch):
+    from research_assistant import answer, store
+
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
+    monkeypatch.setattr(
+        answer,
+        "load_settings",
+        lambda: {
+            "chat_model": "space-bunny-free",
+            "chat_provider": "zen",
+            "web_search": True,
+        },
+    )
+    conn = store.connect()
+    store.insert_chunks(conn, "/x/doc.txt", [("p1", "Vioxx damaged hearts")])
+    conn.commit()
+    conn.close()
+
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Vioxx damaged hearts [1]"}}]}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        seen["plugins"] = kwargs["json"].get("plugins")
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    result = answer.ask("what drug damaged hearts")
+
+    assert result["error"] is None
+    assert seen["url"] == "https://opencode.ai/zen/v1/chat/completions"
+    assert seen["plugins"] is None
+    assert result["model"] == "space-bunny-free"

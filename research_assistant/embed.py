@@ -11,24 +11,34 @@ LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_BATCH = 64
 
 
-def api_key() -> str | None:
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+def _env_name(provider: str | None) -> str:
+    from research_assistant.providers import get_provider
+
+    return get_provider(provider)["env"]
+
+
+def api_key(provider: str | None = None) -> str | None:
+    name = _env_name(provider)
+    key = os.environ.get(name, "").strip()
     if key:
         return key
     env_file = PROJECT_DIR / ".env"
     if env_file.exists():
+        prefix = name + "="
         for line in env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if line.startswith("OPENROUTER_API_KEY="):
+            if line.startswith(prefix):
                 return line.split("=", 1)[1].strip().strip('"').strip("'") or None
     return None
 
 
-def has_api_key() -> bool:
-    return api_key() is not None
+def has_api_key(provider: str | None = None) -> bool:
+    return api_key(provider) is not None
 
 
-def set_api_key(value: str) -> None:
+def set_api_key(value: str, provider: str | None = None) -> None:
+    name = _env_name(provider)
+    label = name
     value = value.strip()
     if not value:
         raise ValueError("The key is empty.")
@@ -38,11 +48,11 @@ def set_api_key(value: str) -> None:
     lines: list[str] = []
     if env_file.exists():
         lines = env_file.read_text(encoding="utf-8").splitlines()
-    placeholder = "OPENROUTER_API_KEY="
+    placeholder = f"{label}="
     replaced = False
     for index, line in enumerate(lines):
-        if line.strip().startswith("OPENROUTER_API_KEY="):
-            lines[index] = f"OPENROUTER_API_KEY={value}"
+        if line.strip().startswith(label + "="):
+            lines[index] = placeholder + value
             replaced = True
             break
     if not replaced:
@@ -53,7 +63,7 @@ def set_api_key(value: str) -> None:
     descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(text)
-    logger.log("Settings", "OpenRouter API key saved to .env")
+    logger.log("Settings", f"{label} key saved to .env")
 
 
 def backend_info(mode: str | None = None) -> dict:

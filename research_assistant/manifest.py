@@ -8,6 +8,7 @@ from research_assistant.config import INDEX_DIR, INDEX_FOLDERS
 
 SUPPORTED = {".pdf", ".epub", ".html", ".htm", ".txt", ".md", ".zip"}
 SKIP: set[str] = set()
+SKIP_FILES: set[str] = {"Futile_Work (3).epub", "Futile_Work (4).epub"}
 
 
 @dataclass
@@ -49,6 +50,18 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _record(conn, path, stat, sha, kind, status) -> None:
+    conn.execute(
+        """INSERT INTO files (path, size, mtime, sha256, kind, status)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(path) DO UPDATE SET
+             size=excluded.size, mtime=excluded.mtime,
+             sha256=excluded.sha256, kind=excluded.kind,
+             status=excluded.status, error=NULL""",
+        (str(path), stat.st_size, stat.st_mtime, sha, kind, status),
+    )
+
+
 def scan() -> dict:
     conn = _connect()
     found = 0
@@ -72,11 +85,33 @@ def scan() -> dict:
                 continue
             try:
                 stat = path.stat()
+                kind = suffix.lstrip(".")
+                if path.name in SKIP_FILES:
+                    row = conn.execute(
+                        "SELECT size, mtime, sha256 FROM files WHERE path = ?",
+                        (str(path),),
+                    ).fetchone()
+                    same = row and row[0] == stat.st_size and row[1] == stat.st_mtime
+                    _record(
+                        conn,
+                        path,
+                        stat,
+                        row[2] if same else _hash_file(path),
+                        kind,
+                        "skipped",
+                    )
+                    skipped += 1
+                    continue
                 row = conn.execute(
                     "SELECT size, mtime, status FROM files WHERE path = ?",
                     (str(path),),
                 ).fetchone()
-                if row and row[0] == stat.st_size and row[1] == stat.st_mtime:
+                if (
+                    row
+                    and row[0] == stat.st_size
+                    and row[1] == stat.st_mtime
+                    and row[2] != "skipped"
+                ):
                     unchanged += 1
                     continue
                 sha = _hash_file(path)
@@ -86,22 +121,7 @@ def scan() -> dict:
                     changed += 1
                 else:
                     found += 1
-                conn.execute(
-                    """INSERT INTO files (path, size, mtime, sha256, kind, status)
-                       VALUES (?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(path) DO UPDATE SET
-                         size=excluded.size, mtime=excluded.mtime,
-                         sha256=excluded.sha256, kind=excluded.kind,
-                         status=excluded.status, error=NULL""",
-                    (
-                        str(path),
-                        stat.st_size,
-                        stat.st_mtime,
-                        sha,
-                        suffix.lstrip("."),
-                        status,
-                    ),
-                )
+                _record(conn, path, stat, sha, kind, status)
             except OSError as exc:
                 errors += 1
                 logger.log("Manifest", f"Cannot read {path}: {exc}")
@@ -127,6 +147,15 @@ def pending(statuses: tuple[str, ...] = ("new", "changed")) -> list[FileRecord]:
     ).fetchall()
     conn.close()
     return [FileRecord(*row) for row in rows]
+
+
+def skipped_files() -> list[str]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT path FROM files WHERE status = 'skipped' ORDER BY path"
+    ).fetchall()
+    conn.close()
+    return [row[0] for row in rows]
 
 
 def mark(path: str, status: str, error: str | None = None) -> None:

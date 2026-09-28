@@ -1,12 +1,37 @@
 import re
+import time
 
 from research_assistant import logger
 from research_assistant.config import load_settings
 from research_assistant.embed import api_key
+from research_assistant.providers import get_provider
 from research_assistant.search import Source, document_key, search
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-SEARCH_CANDIDATES = 24
+SEARCH_CANDIDATES = 60
+MAX_DOCUMENTS = 8
+PASSAGES_PER_DOCUMENT = 4
+MAX_PASSAGES = 16
+LANE_PRIORITY = 8
+PASSAGE_CHARS = 4000
+RETRY_DELAYS = (3, 8, 15)
+TRANSIENT_CODES = {408, 429, 500, 502, 503, 504}
+TRANSIENT_WORDS = (
+    "overloaded",
+    "rate limit",
+    "temporarily",
+    "unavailable",
+    "timeout",
+    "timed out",
+    "connection",
+    "try again",
+)
+NON_TRANSIENT_WORDS = (
+    "per-day",
+    "add credits",
+    "insufficient credit",
+    "not supported",
+    "invalid api key",
+)
 HISTORY_LIMIT = 3
 HISTORY_ANSWER_CHARS = 2000
 SYSTEM_PROMPT = (
@@ -15,6 +40,10 @@ SYSTEM_PROMPT = (
     "context: use it to understand what is being asked, but cite only "
     "the passages listed below. If the passages do not contain the "
     "answer, say so plainly. "
+    "If the question gives a partial clue such as a starting letter, "
+    "scan the passages for words that begin with that letter before "
+    "concluding the answer is missing. Prefer a rare name over a common "
+    "word when both start with the same letter. "
     "Write for a non-expert: plain language, no jargon. "
     "Cite with square brackets and a bare number only, like [1] or [2]. "
     "Never use any other citation style: no curly brackets, no daggers, "
@@ -43,6 +72,19 @@ def _normalize_citations(text: str, count: int) -> str:
         text,
     )
     return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _is_transient(error: object) -> bool:
+    code = None
+    if isinstance(error, dict):
+        code = error.get("code")
+        error = error.get("message") or error
+    text = str(error).lower()
+    if any(word in text for word in NON_TRANSIENT_WORDS):
+        return False
+    if isinstance(code, int) and code in TRANSIENT_CODES:
+        return True
+    return any(word in text for word in TRANSIENT_WORDS)
 
 
 def _trim_history(history: list | None) -> list[dict]:
@@ -83,22 +125,38 @@ def _build_user_prompt(
     lines.append("Passages:")
     for index, source in enumerate(sources, start=1):
         lines.append(f"[{index}] {source.file_path} ({source.location})")
-        lines.append(source.text[:2500])
+        lines.append(source.text[:PASSAGE_CHARS])
         lines.append("")
     return "\n".join(lines)
 
 
-def _distinct_documents(sources: list[Source], limit: int) -> list[Source]:
-    seen: set[str] = set()
+def _select_sources(sources: list[Source]) -> list[Source]:
+    counts: dict[str, int] = {}
     kept: list[Source] = []
-    for source in sources:
+
+    def take(source: Source) -> bool:
         key = document_key(source)
-        if key in seen:
-            continue
-        seen.add(key)
+        if counts.get(key, 0) >= PASSAGES_PER_DOCUMENT:
+            return True
+        if key not in counts and len(counts) >= MAX_DOCUMENTS:
+            return True
+        counts[key] = counts.get(key, 0) + 1
         kept.append(source)
-        if len(kept) >= limit:
-            break
+        return len(kept) < MAX_PASSAGES
+
+    first_pass: list[Source] = []
+    second_pass: list[Source] = []
+    for source in sources:
+        if source.lane and len(first_pass) < LANE_PRIORITY:
+            first_pass.append(source)
+        else:
+            second_pass.append(source)
+    for source in first_pass:
+        if not take(source):
+            return kept
+    for source in second_pass:
+        if not take(source):
+            return kept
     return kept
 
 
@@ -113,7 +171,12 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
             f"Follow-up with {len(turns)} earlier turn(s); "
             f"searching on: {search_text[:160]}",
         )
-    sources = _distinct_documents(search(search_text, limit=SEARCH_CANDIDATES), limit=8)
+    sources = _select_sources(search(search_text, limit=SEARCH_CANDIDATES))
+    logger.verbose(
+        "Answer",
+        f"Selected {len(sources)} passages from "
+        f"{len({document_key(source) for source in sources})} documents",
+    )
     result: dict = {
         "question": question,
         "answer": None,
@@ -129,14 +192,18 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
         )
         logger.log("Answer", "No sources found for question")
         return result
-    key = api_key()
+    provider = get_provider(settings["chat_provider"])
+    key = api_key(provider["id"])
     if not key:
         result["error"] = (
-            "Passages were found, but no OpenRouter API key is set, so a "
-            "written answer cannot be produced yet. Set OPENROUTER_API_KEY "
-            "in the .env file and restart."
+            f"Passages were found, but no {provider['label']} API key is set, "
+            "so a written answer cannot be produced yet. Open Settings and "
+            "paste your key into the key box."
         )
-        logger.log("Answer", "No API key; returning passages only")
+        logger.log(
+            "Answer",
+            f"No {provider['label']} API key; returning passages only",
+        )
         return result
     try:
         import requests
@@ -152,31 +219,63 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
             ],
             "temperature": 0.2,
         }
-        if settings.get("web_search"):
+        if settings.get("web_search") and provider["supports_web_search"]:
             payload["plugins"] = [{"id": "web", "max_results": 5}]
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=180,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"model returned {response.status_code}: {response.text[:300]}"
-            )
-        data = response.json()
-        if "error" in data:
-            raise RuntimeError(str(data["error"])[:300])
-        result["answer"] = _normalize_citations(
-            data["choices"][0]["message"]["content"].strip(),
-            len(sources),
-        )
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        attempts = 1 + len(RETRY_DELAYS)
+        last_error: Exception = RuntimeError("model did not answer")
+        answer_text: str | None = None
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(RETRY_DELAYS[attempt - 1])
+            try:
+                response = requests.post(
+                    provider["url"], headers=headers, json=payload, timeout=180
+                )
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                logger.log(
+                    "Answer",
+                    f"Network problem, attempt {attempt + 1}/{attempts}: {exc}",
+                )
+                continue
+            if response.status_code in TRANSIENT_CODES:
+                last_error = RuntimeError(
+                    f"model returned {response.status_code}: {response.text[:300]}"
+                )
+                logger.log(
+                    "Answer",
+                    f"Model busy ({response.status_code}), "
+                    f"attempt {attempt + 1}/{attempts}",
+                )
+                continue
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"model returned {response.status_code}: {response.text[:300]}"
+                )
+            data = response.json()
+            if "error" in data:
+                if _is_transient(data["error"]):
+                    last_error = RuntimeError(str(data["error"])[:300])
+                    logger.log(
+                        "Answer",
+                        f"Model busy, attempt {attempt + 1}/{attempts}: "
+                        f"{str(data['error'])[:120]}",
+                    )
+                    continue
+                raise RuntimeError(str(data["error"])[:300])
+            answer_text = data["choices"][0]["message"]["content"].strip()
+            break
+        if answer_text is None:
+            raise last_error
+        result["answer"] = _normalize_citations(answer_text, len(sources))
         logger.log(
             "Answer",
-            f"Answer produced ({len(result['answer'])} chars, model {model_id})",
+            f"Answer produced ({len(result['answer'])} chars, "
+            f"model {model_id}, provider {provider['label']})",
         )
     except Exception as exc:
         result["error"] = f"The model could not answer: {exc}"

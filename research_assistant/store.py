@@ -152,6 +152,21 @@ def fts_search(conn: sqlite3.Connection, query: str, limit: int = 500) -> list[i
     return [row[0] for row in rows]
 
 
+def fts_match(conn: sqlite3.Connection, match: str, limit: int = 200) -> list[int]:
+    if not match:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (match, limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        logger.log("Store", f"FTS query failed: {exc}")
+        return []
+    return [row[0] for row in rows]
+
+
 def vector_search(
     conn: sqlite3.Connection, query_vector: np.ndarray, limit: int = 500
 ) -> list[tuple[int, float]]:

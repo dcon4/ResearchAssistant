@@ -19,6 +19,8 @@ DEFAULTS = {
     "web_search": False,
     "rescan_timer": True,
     "chat_model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "chat_provider": "openrouter",
+    "chat_models": {},
     "rerank": False,
     "host": "0.0.0.0",
     "port": 8642,

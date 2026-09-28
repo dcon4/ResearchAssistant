@@ -26,43 +26,64 @@ CPU time; openrouter mode costs a few dollars.</p>
 
   <fieldset>
     <legend>Answering</legend>
-    <label for="openrouter_key">OpenRouter API key</label>
-    <input type="password" id="openrouter_key" name="openrouter_key"
+
+    <p>Choose where answers come from. Each one needs its own key.</p>
+    {% for p in providers %}
+    <label>
+      <input type="radio" name="chat_provider" value="{{ p.id }}"
+             {% if settings.chat_provider == p.id %}checked{% endif %}>
+      {{ p.label }}{% if key_flags[p.id] %} - key saved{% else %} - no key saved yet{% endif %}
+    </label>
+    {% endfor %}
+
+    <label for="provider_key">{{ provider.label }} API key</label>
+    <input type="password" id="provider_key" name="provider_key"
            value="" autocomplete="new-password"
            aria-describedby="key-help"
-           placeholder="{% if key_set %}A key is saved - type to replace it{% else %}Paste your key here{% endif %}">
+           placeholder="{% if key_flags[provider.id] %}A key is saved - type to replace it{% else %}Paste your key here{% endif %}">
     <p id="key-help">
-      {% if key_set %}
-      A key is saved. It is hidden and never shown again. Leave this box
-      empty to keep the saved key.
+      {% if key_flags[provider.id] %}
+      A key is saved for {{ provider.label }}. It is hidden and never shown
+      again. Leave this box empty to keep the saved key.
       {% else %}
-      No key saved yet. Get one at openrouter.ai, then paste it here and
-      press Save. It is stored only on this computer and is never shown
-      on screen again.
+      No key saved for {{ provider.label }} yet. Get one at {{ provider.site }},
+      then paste it here and press Save. It is stored only on this computer
+      and is never shown on screen again.
       {% endif %}
+      Keys for the other providers are kept separately, so switching back
+      later does not lose them.
     </p>
-    <label for="chat_model">Chat model (OpenRouter model name)</label>
+
+    <label for="chat_model">Chat model name</label>
     <input type="text" id="chat_model" name="chat_model"
            value="{{ settings.chat_model }}" list="model-options"
            aria-describedby="model-help">
     <datalist id="model-options">
-      <option value="nvidia/nemotron-3-super-120b-a12b:free">Fast, short answers, cites sources</option>
-      <option value="nvidia/nemotron-3-ultra-550b-a55b:free">Slower, longer, more thorough</option>
-      <option value="nvidia/nemotron-3.5-lightning:free">Very long context, thinks out loud</option>
+      {% for m in models %}
+      <option value="{{ m.id }}" data-free="{{ 'yes' if m.free else 'no' }}">{{ m.label }}</option>
+      {% endfor %}
     </datalist>
+    <label>
+      <input type="checkbox" id="free-only" checked>
+      Only show free models in the list above
+    </label>
+    <p role="status" id="filter-status"></p>
     <p id="model-help">
-      All three suggestions above are free and were tested working with
-      this app. The first is the fastest. The last one tends to think out
-      loud before answering, which sounds long when read aloud.
+      The model name must belong to the provider you picked above: a
+      Groq name will not work on OpenCode Zen, and so on. Typing a few
+      letters of the name shows matching suggestions. If a name is
+      rejected, copy the current one from the provider's website.
     </p>
+
     <label>
       <input type="checkbox" name="web_search"
              {% if settings.web_search %}checked{% endif %}>
       Web search - let the model look things up online
     </label>
-    <p>Web search works with the free models listed above. It adds
-    outside information to an answer, so turn it off when you only want
-    what is in your own documents.</p>
+    <p>Web search is an extra that only OpenRouter offers. With any
+    other provider this switch is ignored. It adds outside information
+    to an answer, so turn it off when you only want what is in your own
+    documents.</p>
     <label>
       <input type="checkbox" name="rerank" {% if settings.rerank %}checked{% endif %}>
       Rerank - re-sort search results for better accuracy
@@ -84,4 +105,31 @@ CPU time; openrouter mode costs a few dollars.</p>
 
   <button type="submit">Save settings</button>
 </form>
+<script>
+(function () {
+  var box = document.getElementById("free-only");
+  var list = document.getElementById("model-options");
+  var status = document.getElementById("filter-status");
+  if (!box || !list || !status) {
+    return;
+  }
+  var options = Array.prototype.slice.call(list.querySelectorAll("option"));
+  function apply() {
+    var kept = options.filter(function (option) {
+      return !box.checked || option.getAttribute("data-free") === "yes";
+    });
+    while (list.firstChild) {
+      list.removeChild(list.firstChild);
+    }
+    kept.forEach(function (option) {
+      list.appendChild(option);
+    });
+    status.textContent =
+      "Showing " + kept.length + " of " + options.length +
+      " model suggestions.";
+  }
+  box.addEventListener("change", apply);
+  apply();
+})();
+</script>
 {% endblock %}

@@ -229,6 +229,14 @@ def status():
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings_page():
+    from research_assistant.embed import has_api_key, set_api_key
+    from research_assistant.providers import (
+        PROVIDER_ORDER,
+        PROVIDERS,
+        all_models,
+        get_provider,
+    )
+
     settings = load_settings()
     message = None
     if request.method == "POST":
@@ -244,32 +252,53 @@ def settings_page():
                 )
                 settings["_reembed_notice"] = True
             settings["embedding_mode"] = mode
-        chat_model = (request.form.get("chat_model") or "").strip()
-        if chat_model:
-            settings["chat_model"] = chat_model
+        provider_id = request.form.get("chat_provider")
+        provider = (
+            get_provider(provider_id)
+            if provider_id in PROVIDERS
+            else get_provider(settings["chat_provider"])
+        )
+        submitted = (request.form.get("chat_model") or "").strip()
+        cached = settings.get("chat_models") or {}
+        provider_changed = provider["id"] != settings["chat_provider"]
+        if provider_changed and submitted == settings["chat_model"]:
+            model = cached.get(provider["id"]) or provider["default_model"]
+        else:
+            model = submitted or settings["chat_model"]
+        settings["chat_provider"] = provider["id"]
+        settings.setdefault("chat_models", {})[provider["id"]] = model
+        settings["chat_model"] = model
         save_settings(settings)
         logger.set_verbose(settings["verbose"])
-        logger.log("Settings", "Settings saved")
+        logger.log(
+            "Settings",
+            f"Settings saved (provider {provider['label']}, model {model})",
+        )
         message = "Settings saved."
-        key_value = (request.form.get("openrouter_key") or "").strip()
+        key_value = (request.form.get("provider_key") or "").strip()
         if key_value:
-            from research_assistant.embed import set_api_key
-
             try:
-                set_api_key(key_value)
-                message = "Settings and API key saved."
+                set_api_key(key_value, provider["id"])
+                message = f"Settings and {provider['label']} API key saved."
             except ValueError as exc:
                 message = f"Settings saved, but the API key was not: {exc}"
+        elif not has_api_key(provider["id"]):
+            message = (
+                f"Settings saved. No {provider['label']} key is saved yet - "
+                "paste one into the key box above and save again."
+            )
     settings = load_settings()
     reembed = settings.pop("_reembed_notice", False)
-    from research_assistant.embed import has_api_key
-
+    provider = get_provider(settings["chat_provider"])
     return render_template(
         "settings.html",
         settings=settings,
         message=message,
         reembed=reembed,
-        key_set=has_api_key(),
+        provider=provider,
+        providers=[get_provider(pid) for pid in PROVIDER_ORDER],
+        models=all_models(),
+        key_flags={pid: has_api_key(pid) for pid in PROVIDER_ORDER},
     )
 
 
