@@ -97,6 +97,15 @@ def _index_stats() -> dict:
         return {"chunks": 0, "files": 0, "vectors": 0}
 
 
+EXCERPT_CHARS = 400
+
+
+def _excerpt(text: str) -> str:
+    if len(text) <= EXCERPT_CHARS:
+        return text
+    return text[:EXCERPT_CHARS] + "..."
+
+
 def _folder_name(path: str) -> str:
     target = Path(path)
     for root in INDEX_FOLDERS:
@@ -151,6 +160,7 @@ def api_ask():
             "folder": _folder_name(source.file_path),
             "title": _doc_title(source.file_path, source.location),
             "location": source.location,
+            "text": _excerpt(source.text),
             "score": round(source.score, 4),
         }
         for source in result["sources"]

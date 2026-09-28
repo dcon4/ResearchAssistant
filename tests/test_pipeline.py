@@ -649,6 +649,7 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
             "folder": "Ebooks",
             "title": "summary",
             "location": "notes/summary.txt",
+            "text": "body",
             "score": 0.5,
         }
     ]
@@ -713,3 +714,27 @@ def test_answer_fetches_extra_candidates_before_deduplicating(tmp_path, monkeypa
     result = answer.ask("anything at all")
     assert seen["limit"] == answer.SEARCH_CANDIDATES
     assert result["sources"] == []
+
+
+def test_source_excerpt_matches_the_web_page(tmp_path, monkeypatch):
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    def fake_ask(question, model=None):
+        return {
+            "question": question,
+            "answer": "a",
+            "model": "m",
+            "sources": [
+                Source("/x/Ebooks/long.epub", "Chapter One", "y" * 900, 1.0, "bm25"),
+                Source("/x/Ebooks/short.epub", "Chapter Two", "z" * 50, 1.0, "bm25"),
+            ],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+    data = client.post("/api/ask", json={"question": "q"}).get_json()
+    long_excerpt = data["sources"][0]["text"]
+    assert long_excerpt == "y" * 400 + "..."
+    assert data["sources"][1]["text"] == "z" * 50
