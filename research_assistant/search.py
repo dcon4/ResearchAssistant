@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from research_assistant import logger, store
 from research_assistant.embed import backend_info, cached_embedder
+
+DOC_SUFFIXES = {".txt", ".md", ".html", ".htm", ".pdf", ".epub"}
 
 
 @dataclass
@@ -13,6 +16,15 @@ class Source:
     text: str
     score: float
     stage: str
+
+
+def document_key(source: Source) -> str:
+    location = source.location
+    if "/" in location:
+        tail = location.rsplit("/", 1)[-1]
+        if Path(tail).suffix.lower() in DOC_SUFFIXES:
+            return f"{source.file_path}::{location}"
+    return source.file_path
 
 
 def _cosine_scores(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:

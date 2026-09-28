@@ -3,9 +3,10 @@ import re
 from research_assistant import logger
 from research_assistant.config import load_settings
 from research_assistant.embed import api_key
-from research_assistant.search import Source, search
+from research_assistant.search import Source, document_key, search
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+SEARCH_CANDIDATES = 24
 SYSTEM_PROMPT = (
     "You are a careful research assistant. Answer only from the supplied "
     "passages. If the passages do not contain the answer, say so plainly. "
@@ -48,10 +49,24 @@ def _build_user_prompt(question: str, sources: list[Source]) -> str:
     return "\n".join(lines)
 
 
+def _distinct_documents(sources: list[Source], limit: int) -> list[Source]:
+    seen: set[str] = set()
+    kept: list[Source] = []
+    for source in sources:
+        key = document_key(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(source)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
 def ask(question: str, model: str | None = None) -> dict:
     settings = load_settings()
     model_id = (model or "").strip() or settings["chat_model"]
-    sources = search(question, limit=8)
+    sources = _distinct_documents(search(question, limit=SEARCH_CANDIDATES), limit=8)
     result: dict = {
         "question": question,
         "answer": None,

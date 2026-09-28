@@ -17,6 +17,7 @@ from research_assistant.config import (
     load_settings,
     save_settings,
 )
+from research_assistant.search import DOC_SUFFIXES
 
 app = Flask(__name__, template_folder=str(PROJECT_DIR / "templates"))
 
@@ -107,6 +108,14 @@ def _folder_name(path: str) -> str:
     return target.parent.name
 
 
+def _doc_title(file_path: str, location: str) -> str:
+    if "/" in location:
+        tail = location.rsplit("/", 1)[-1]
+        if Path(tail).suffix.lower() in DOC_SUFFIXES:
+            return Path(tail).stem.replace("_", " ").strip()
+    return Path(file_path).stem.replace("_", " ").strip()
+
+
 @app.route("/api/status")
 def api_status():
     stats = _index_stats()
@@ -140,6 +149,7 @@ def api_ask():
         {
             "file": source.file_path,
             "folder": _folder_name(source.file_path),
+            "title": _doc_title(source.file_path, source.location),
             "location": source.location,
             "score": round(source.score, 4),
         }

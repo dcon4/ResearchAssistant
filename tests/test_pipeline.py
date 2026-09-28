@@ -647,7 +647,69 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
         {
             "file": "/mnt/ls-share/opencode/Ebooks/notes/summary.txt",
             "folder": "Ebooks",
+            "title": "summary",
             "location": "notes/summary.txt",
             "score": 0.5,
         }
     ]
+
+
+def test_doc_title_reads_like_a_name_the_user_recognises():
+    from research_assistant.webui import _doc_title
+
+    assert (
+        _doc_title("/mnt/x/Ebooks/Futile_Work_300.epub", "DM Newsletters")
+        == "Futile Work 300"
+    )
+    assert (
+        _doc_title("/mnt/x/Ebooks/Futile_Work_Filtered.pdf", "pages 401-600")
+        == "Futile Work Filtered"
+    )
+    assert _doc_title("/mnt/x/reports/bundle.zip", "notes/summary.txt") == "summary"
+    assert _doc_title("/mnt/x/Ebooks/book.epub", "Chapter One") == "book"
+
+
+def test_answer_lists_each_document_once():
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    def fake_search(question, limit=8):
+        return [
+            Source("/x/Ebooks/plan.txt", "full text", "a", 1.0, "keyword"),
+            Source("/x/Ebooks/plan.txt", "full text", "b", 0.9, "keyword"),
+            Source("/x/Ebooks/report.txt", "full text", "c", 0.8, "keyword"),
+            Source("/x/Ebooks/report.txt", "full text", "d", 0.7, "keyword"),
+            Source("/x/Ebooks/notes.txt", "full text", "e", 0.6, "keyword"),
+        ]
+
+    kept = answer._distinct_documents(fake_search("q"), limit=8)
+    assert [source.text for source in kept] == ["a", "c", "e"]
+    assert len(answer._distinct_documents(fake_search("q"), limit=2)) == 2
+
+
+def test_documents_inside_one_zip_count_separately():
+    from research_assistant.search import Source, document_key
+
+    one = Source("/x/bundle.zip", "notes/one.txt", "a", 1.0, "keyword")
+    two = Source("/x/bundle.zip", "notes/two.txt", "b", 1.0, "keyword")
+    again = Source("/x/bundle.zip", "notes/one.txt", "c", 1.0, "keyword")
+    pages = Source("/x/bundle.zip", "pages 1-200", "d", 1.0, "keyword")
+    assert document_key(one) == document_key(again)
+    assert document_key(one) != document_key(two)
+    assert document_key(pages) == "/x/bundle.zip"
+
+
+def test_answer_fetches_extra_candidates_before_deduplicating(tmp_path, monkeypatch):
+    from research_assistant import answer, config
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    seen = {}
+
+    def fake_search(question, limit=8):
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(answer, "search", fake_search)
+    result = answer.ask("anything at all")
+    assert seen["limit"] == answer.SEARCH_CANDIDATES
+    assert result["sources"] == []
