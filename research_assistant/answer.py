@@ -7,9 +7,14 @@ from research_assistant.search import Source, document_key, search
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 SEARCH_CANDIDATES = 24
+HISTORY_LIMIT = 3
+HISTORY_ANSWER_CHARS = 2000
 SYSTEM_PROMPT = (
     "You are a careful research assistant. Answer only from the supplied "
-    "passages. If the passages do not contain the answer, say so plainly. "
+    "passages. A short earlier conversation may be given above for "
+    "context: use it to understand what is being asked, but cite only "
+    "the passages listed below. If the passages do not contain the "
+    "answer, say so plainly. "
     "Write for a non-expert: plain language, no jargon. "
     "Cite with square brackets and a bare number only, like [1] or [2]. "
     "Never use any other citation style: no curly brackets, no daggers, "
@@ -40,8 +45,42 @@ def _normalize_citations(text: str, count: int) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def _build_user_prompt(question: str, sources: list[Source]) -> str:
-    lines = [f"Question: {question}", "", "Passages:"]
+def _trim_history(history: list | None) -> list[dict]:
+    turns: list[dict] = []
+    for item in (history or [])[-HISTORY_LIMIT:]:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if question and answer:
+            turns.append(
+                {
+                    "question": question,
+                    "answer": answer[:HISTORY_ANSWER_CHARS],
+                }
+            )
+    return turns
+
+
+def _search_text(question: str, turns: list[dict]) -> str:
+    if not turns:
+        return question
+    return f"{turns[-1]['question']} {question}"
+
+
+def _build_user_prompt(
+    question: str, sources: list[Source], turns: list[dict] | None = None
+) -> str:
+    lines: list[str] = []
+    if turns:
+        lines.append("Earlier conversation:")
+        for turn in turns:
+            lines.append(f"Q: {turn['question']}")
+            lines.append(f"A: {turn['answer']}")
+            lines.append("")
+    lines.append(f"Question: {question}")
+    lines.append("")
+    lines.append("Passages:")
     for index, source in enumerate(sources, start=1):
         lines.append(f"[{index}] {source.file_path} ({source.location})")
         lines.append(source.text[:2500])
@@ -63,14 +102,23 @@ def _distinct_documents(sources: list[Source], limit: int) -> list[Source]:
     return kept
 
 
-def ask(question: str, model: str | None = None) -> dict:
+def ask(question: str, model: str | None = None, history: list | None = None) -> dict:
     settings = load_settings()
     model_id = (model or "").strip() or settings["chat_model"]
-    sources = _distinct_documents(search(question, limit=SEARCH_CANDIDATES), limit=8)
+    turns = _trim_history(history)
+    search_text = _search_text(question, turns)
+    if turns:
+        logger.log(
+            "Answer",
+            f"Follow-up with {len(turns)} earlier turn(s); "
+            f"searching on: {search_text[:160]}",
+        )
+    sources = _distinct_documents(search(search_text, limit=SEARCH_CANDIDATES), limit=8)
     result: dict = {
         "question": question,
         "answer": None,
         "model": model_id,
+        "history": turns,
         "sources": sources,
         "error": None,
     }
@@ -97,7 +145,10 @@ def ask(question: str, model: str | None = None) -> dict:
             "model": model_id,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_prompt(question, sources)},
+                {
+                    "role": "user",
+                    "content": _build_user_prompt(question, sources, turns),
+                },
             ],
             "temperature": 0.2,
         }

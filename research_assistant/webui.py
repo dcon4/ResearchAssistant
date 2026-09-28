@@ -150,10 +150,12 @@ def api_ask():
     if not question:
         return jsonify({"ok": False, "error": "Please send a question."}), 400
     model = str(data.get("model") or "").strip() or None
+    raw_history = data.get("history")
+    history = raw_history if isinstance(raw_history, list) else None
     logger.log("WebUI", f"API question received: {question[:120]}")
     from research_assistant.answer import ask as answer_ask
 
-    result = answer_ask(question, model=model)
+    result = answer_ask(question, model=model, history=history)
     sources = [
         {
             "file": source.file_path,
@@ -171,6 +173,7 @@ def api_ask():
             "question": result["question"],
             "answer": result["answer"],
             "model": result["model"],
+            "history": result["history"],
             "sources": sources,
             "error": result["error"],
         }

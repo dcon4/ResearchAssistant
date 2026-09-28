@@ -590,12 +590,13 @@ def test_api_ask_passes_the_chosen_model(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_ask(question, model=None):
+    def fake_ask(question, model=None, history=None):
         seen["model"] = model
         return {
             "question": question,
             "answer": "Answer [1].",
             "model": model or "default-model",
+            "history": [],
             "sources": [],
             "error": None,
         }
@@ -631,11 +632,12 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
         stage="bm25",
     )
 
-    def fake_ask(question, model=None):
+    def fake_ask(question, model=None, history=None):
         return {
             "question": question,
             "answer": "Answer [1].",
             "model": "m",
+            "history": [],
             "sources": [source],
             "error": None,
         }
@@ -720,11 +722,12 @@ def test_source_excerpt_matches_the_web_page(tmp_path, monkeypatch):
     from research_assistant import answer
     from research_assistant.search import Source
 
-    def fake_ask(question, model=None):
+    def fake_ask(question, model=None, history=None):
         return {
             "question": question,
             "answer": "a",
             "model": "m",
+            "history": [],
             "sources": [
                 Source("/x/Ebooks/long.epub", "Chapter One", "y" * 900, 1.0, "bm25"),
                 Source("/x/Ebooks/short.epub", "Chapter Two", "z" * 50, 1.0, "bm25"),
@@ -738,3 +741,90 @@ def test_source_excerpt_matches_the_web_page(tmp_path, monkeypatch):
     long_excerpt = data["sources"][0]["text"]
     assert long_excerpt == "y" * 400 + "..."
     assert data["sources"][1]["text"] == "z" * 50
+
+
+def test_history_is_capped_at_three_turns():
+    from research_assistant import answer
+
+    assert answer.HISTORY_LIMIT == 3
+    turns = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(6)]
+    trimmed = answer._trim_history(turns)
+    assert [turn["question"] for turn in trimmed] == ["q3", "q4", "q5"]
+
+    junk = ["a string", None, {"question": "only", "answer": "  "}, "   "]
+    assert answer._trim_history(junk) == []
+    assert answer._trim_history(None) == []
+
+    long = answer._trim_history([{"question": "q", "answer": "x" * 9000}])
+    assert len(long[0]["answer"]) == answer.HISTORY_ANSWER_CHARS
+
+
+def test_followup_search_includes_the_previous_question(tmp_path, monkeypatch):
+    from research_assistant import answer, config
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    seen = {}
+
+    def fake_search(question, limit=8):
+        seen["query"] = question
+        return []
+
+    monkeypatch.setattr(answer, "search", fake_search)
+    answer.ask(
+        "what about his other books",
+        history=[{"question": "who is David McGowan", "answer": "a researcher"}],
+    )
+    assert seen["query"] == "who is David McGowan what about his other books"
+
+    answer.ask("plain question")
+    assert seen["query"] == "plain question"
+
+
+def test_prompt_carries_the_earlier_conversation():
+    from research_assistant import answer
+    from research_assistant.search import Source
+
+    source = Source("/x/Ebooks/b.epub", "Chapter", "body", 1.0, "bm25")
+    prompt = answer._build_user_prompt(
+        "and then?", [source], [{"question": "first", "answer": "answered"}]
+    )
+    assert prompt.index("Earlier conversation:") < prompt.index("Question: and then?")
+    assert "Q: first" in prompt
+    assert "A: answered" in prompt
+    assert "[1]" in prompt
+
+    plain = answer._build_user_prompt("and then?", [source])
+    assert "Earlier conversation:" not in plain
+
+
+def test_api_accepts_history_and_returns_what_it_kept(tmp_path, monkeypatch):
+    from research_assistant import answer
+
+    captured = {}
+
+    def fake_ask(question, model=None, history=None):
+        captured["history"] = history
+        return {
+            "question": question,
+            "answer": "ok",
+            "model": "m",
+            "history": answer._trim_history(history),
+            "sources": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+
+    payload = {
+        "question": "follow up",
+        "history": [{"question": f"q{i}", "answer": f"a{i}"} for i in range(6)],
+    }
+    data = client.post("/api/ask", json=payload).get_json()
+    assert len(captured["history"]) == 6
+    assert [turn["question"] for turn in data["history"]] == ["q3", "q4", "q5"]
+
+    data = client.post(
+        "/api/ask", json={"question": "x", "history": "not a list"}
+    ).get_json()
+    assert data["history"] == []
