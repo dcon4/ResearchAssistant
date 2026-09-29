@@ -125,17 +125,22 @@ def test_skip_files_are_recorded_and_never_pending(
     folder = tmp_path / "docs"
     folder.mkdir()
     (folder / "keep.txt").write_text("keep this", encoding="utf-8")
-    (folder / "Futile_Work (3).epub").write_text("copy one", encoding="utf-8")
-    (folder / "Futile_Work (4).epub").write_text("copy two", encoding="utf-8")
+    (folder / "sample_copy_a.epub").write_text("copy one", encoding="utf-8")
+    (folder / "sample_copy_b.epub").write_text("copy two", encoding="utf-8")
     monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    monkeypatch.setattr(
+        manifest,
+        "load_settings",
+        lambda: {"skip_files": ["sample_copy_a.epub", "sample_copy_b.epub"]},
+    )
 
     summary = manifest.scan()
 
     assert summary["skipped"] == 2
     assert manifest.counts()["skipped"] == 2
     assert manifest.skipped_files() == [
-        str(folder / "Futile_Work (3).epub"),
-        str(folder / "Futile_Work (4).epub"),
+        str(folder / "sample_copy_a.epub"),
+        str(folder / "sample_copy_b.epub"),
     ]
     assert [record.path for record in manifest.pending()] == [str(folder / "keep.txt")]
 
@@ -690,7 +695,7 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
     from research_assistant.search import Source
 
     source = Source(
-        file_path="/mnt/ls-share/opencode/Ebooks/notes/summary.txt",
+        file_path="/mnt/x/Ebooks/notes/summary.txt",
         location="notes/summary.txt",
         text="body",
         score=0.5,
@@ -709,11 +714,14 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(answer, "ask", fake_ask)
+    from research_assistant import webui
+
+    monkeypatch.setattr(webui, "INDEX_FOLDERS", [Path("/mnt/x/Ebooks")])
     client = _api_client(tmp_path, monkeypatch)
     data = client.post("/api/ask", json={"question": "q"}).get_json()
     assert data["sources"] == [
         {
-            "file": "/mnt/ls-share/opencode/Ebooks/notes/summary.txt",
+            "file": "/mnt/x/Ebooks/notes/summary.txt",
             "folder": "Ebooks",
             "title": "summary",
             "location": "notes/summary.txt",
@@ -727,12 +735,12 @@ def test_doc_title_reads_like_a_name_the_user_recognises():
     from research_assistant.webui import _doc_title
 
     assert (
-        _doc_title("/mnt/x/Ebooks/Futile_Work_300.epub", "DM Newsletters")
-        == "Futile Work 300"
+        _doc_title("/mnt/x/Ebooks/Sample_Report_300.epub", "Example Journal")
+        == "Sample Report 300"
     )
     assert (
-        _doc_title("/mnt/x/Ebooks/Futile_Work_Filtered.pdf", "pages 401-600")
-        == "Futile Work Filtered"
+        _doc_title("/mnt/x/Ebooks/Sample_Report_Filtered.pdf", "pages 401-600")
+        == "Sample Report Filtered"
     )
     assert _doc_title("/mnt/x/reports/bundle.zip", "notes/summary.txt") == "summary"
     assert _doc_title("/mnt/x/Ebooks/book.epub", "Chapter One") == "book"
@@ -932,10 +940,10 @@ def test_followup_search_includes_the_previous_question(tmp_path, monkeypatch):
 
     monkeypatch.setattr(answer, "search", fake_search)
     answer.ask(
-        "what about his other books",
-        history=[{"question": "who is David McGowan", "answer": "a researcher"}],
+        "what about her other books",
+        history=[{"question": "who is Jane Doe", "answer": "a researcher"}],
     )
-    assert seen["query"] == "who is David McGowan what about his other books"
+    assert seen["query"] == "who is Jane Doe what about her other books"
 
     answer.ask("plain question")
     assert seen["query"] == "plain question"

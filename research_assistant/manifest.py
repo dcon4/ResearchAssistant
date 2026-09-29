@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from research_assistant import logger
-from research_assistant.config import INDEX_DIR, INDEX_FOLDERS
+from research_assistant.config import INDEX_DIR, INDEX_FOLDERS, load_settings
 
 SUPPORTED = {".pdf", ".epub", ".html", ".htm", ".txt", ".md", ".zip"}
 SKIP: set[str] = set()
-SKIP_FILES: set[str] = {"Futile_Work (3).epub", "Futile_Work (4).epub"}
+SKIP_FILES: set[str] = set()
 
 
 @dataclass
@@ -64,6 +64,7 @@ def _record(conn, path, stat, sha, kind, status) -> None:
 
 def scan() -> dict:
     conn = _connect()
+    skip_names = SKIP_FILES | set(load_settings().get("skip_files") or [])
     found = 0
     unchanged = 0
     changed = 0
@@ -86,7 +87,7 @@ def scan() -> dict:
             try:
                 stat = path.stat()
                 kind = suffix.lstrip(".")
-                if path.name in SKIP_FILES:
+                if path.name in skip_names:
                     row = conn.execute(
                         "SELECT size, mtime, sha256 FROM files WHERE path = ?",
                         (str(path),),

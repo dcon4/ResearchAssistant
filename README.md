@@ -6,17 +6,18 @@ questions your documents cannot answer.
 
 ## What it does
 
-- Reads documents (PDF, EPUB, TXT, HTML, Markdown) from three folders on
-  your NAS share: `opencode/Ebooks`, `opencode/Documents`,
-  `opencode/reports` (including new subfolders).
+- Reads documents (PDF, EPUB, TXT, HTML, Markdown) from three folders
+  you choose (set them in `settings.json` under `index_folders`;
+  subfolders are included).
 - ZIP archives are read as well. Every document inside is indexed, and
   an answer names both the archive and the file within it, for example
   `bundle.zip - notes/summary.txt`. A zip inside a zip is left alone,
   and one file cannot be larger than 60 MB.
 - Builds a searchable index on this computer's hard drive. The
   documents themselves are never moved or copied.
-- Answers your questions with an AI model from OpenRouter, listing
-  which file (and page) each answer came from.
+- Answers your questions with an AI model from the provider of your
+  choice (OpenRouter, Groq, NVIDIA NIM, OpenCode Zen, and others),
+  listing which file (and page) each answer came from.
 
 ## How to start it
 
@@ -28,34 +29,8 @@ python3 -m venv .venv
 ```
 
 Then open the address it prints (for example
-`http://192.168.0.x:8642`) in a browser, on this computer or any
+`http://localhost:8642`) in a browser, on this computer or any
 device on your network.
-
-## Using it away from home
-
-The same pages are also reachable from outside your network, through
-the ngrok tunnel that already runs on this computer:
-
-```
-https://detail-online-exemplary.ngrok-free.dev/assistant/
-```
-
-Three things happen when you open that link:
-
-1. **ngrok's warning page** appears first, because the free ngrok plan
-   always shows one. Press its "Visit Site" button. You only see this
-   once every 7 days.
-2. **A username and password box** appears next, asking for the same
-   login the opencode site uses. It is stored in
-   `~/.config/ngrok/ngrok.yml`.
-3. Then the assistant loads, at `/assistant/` on that address.
-
-Nothing you can see is reachable without that login: without it the
-address returns only ngrok's warning page or a plain "unauthorized"
-message.
-
-It starts on its own at boot, so it comes back after a restart without
-anyone doing anything.
 
 ## The pages
 
@@ -77,10 +52,11 @@ anyone doing anything.
 
 ## Your API key
 
-Copy `.env.example` to `.env` and paste your OpenRouter key into it.
-The key is needed for answering questions (and for embedding only if
-you switch Settings to OpenRouter mode). The `.env` file is never
-committed anywhere.
+Copy `.env.example` to `.env` and paste the key for the provider you
+want to use. The key is needed for answering questions (and for
+embedding only if you switch Settings to OpenRouter mode). Pick the
+provider and model in Settings. The `.env` file is never committed
+anywhere.
 
 ## Costs
 

@@ -7,12 +7,6 @@ LOG_DIR = PROJECT_DIR / "logs"
 INDEX_DIR = PROJECT_DIR / "index"
 MANIFEST_DB = INDEX_DIR / "manifest.sqlite"
 
-INDEX_FOLDERS = [
-    Path("/mnt/ls-share/opencode/Ebooks"),
-    Path("/mnt/ls-share/opencode/Documents"),
-    Path("/mnt/ls-share/opencode/reports"),
-]
-
 DEFAULTS = {
     "verbose": True,
     "embedding_mode": "local",
@@ -28,6 +22,8 @@ DEFAULTS = {
     "chat_fallback_enabled": True,
     "search_fallback_enabled": True,
     "fallback_provider_order": [],
+    "index_folders": [str(Path.home() / "Documents")],
+    "skip_files": [],
 }
 
 
@@ -48,3 +44,6 @@ def save_settings(settings: dict) -> None:
     SETTINGS_FILE.write_text(
         json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+INDEX_FOLDERS = [Path(p) for p in load_settings()["index_folders"]]
