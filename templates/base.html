@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Research Assistant{% endblock %}</title>
+  <style>
+    body { font-family: sans-serif; line-height: 1.5; margin: 0 auto; max-width: 46rem; padding: 1rem; }
+    nav ul { display: flex; gap: 1rem; list-style: none; padding: 0; flex-wrap: wrap; }
+    nav { border-bottom: 1px solid #999; padding-bottom: .5rem; margin-bottom: 1rem; }
+    .skip { position: absolute; left: -9999px; }
+    .skip:focus { left: 1rem; top: 1rem; background: #fff; padding: .5rem; z-index: 10; }
+    label { display: block; margin-top: 1rem; font-weight: bold; }
+    input[type=text] { width: 100%; padding: .5rem; font-size: 1rem; }
+    button { margin-top: 1rem; padding: .5rem 1rem; font-size: 1rem; }
+    .notice, .error { padding: .5rem; margin-top: 1rem; }
+    .notice { background: #e0ffe0; }
+    .error { background: #ffe0e0; }
+    dt { font-weight: bold; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to main content</a>
+  <header>
+    <h1>Research Assistant</h1>
+    <nav aria-label="Main">
+      <ul>
+        <li><a href="{{ url_for('home') }}">Ask</a></li>
+        <li><a href="{{ url_for('status') }}">Index status</a></li>
+        <li><a href="{{ url_for('settings_page') }}">Settings</a></li>
+        <li><a href="{{ url_for('download_log') }}">Download debug log</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

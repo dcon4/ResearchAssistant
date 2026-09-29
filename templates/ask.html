@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Ask - Research Assistant{% endblock %}
+{% block content %}
+<h2>Ask a question</h2>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="{{ url_for('ask') }}">
+  <label for="question">Your question</label>
+  <input type="text" id="question" name="question" value="{{ question or '' }}"
+         aria-describedby="question-help" required>
+  <p id="question-help">Answers will cite the file and where in the file it came from.</p>
+  <button type="submit">Ask</button>
+</form>
+{% if answer %}
+<h3>Answer</h3>
+<div class="answer">{{ answer }}</div>
+{% endif %}
+{% if sources %}
+<h3>Sources</h3>
+<ol class="sources">
+  {% for source in sources %}
+  <li>
+    <cite>{{ source.file_path }}</cite> - {{ source.location }}
+    <p class="excerpt">{{ source.text[:400] }}{% if source.text|length > 400 %}...{% endif %}</p>
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+{% endblock %}

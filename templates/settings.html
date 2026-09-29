@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Settings - Research Assistant{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+{% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
+{% if reembed %}
+<p class="error" role="alert">Embedding mode changed. All documents must be
+re-embedded before search works again: local mode costs nothing but takes
+CPU time; openrouter mode costs a few dollars.</p>
+{% endif %}
+<form method="post">
+  <fieldset>
+    <legend>Embedding</legend>
+    <p>Embedding converts text to numbers for meaning-based search.</p>
+    <label>
+      <input type="radio" name="embedding_mode" value="local"
+             {% if settings.embedding_mode == "local" %}checked{% endif %}>
+      Local - free and private, slower (recommended)
+    </label>
+    <label>
+      <input type="radio" name="embedding_mode" value="openrouter"
+             {% if settings.embedding_mode == "openrouter" %}checked{% endif %}>
+      OpenRouter - a few dollars one-time, best quality
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Answering</legend>
+
+    <p>Choose where answers come from. Each one needs its own key.</p>
+    {% for p in providers %}
+    <label>
+      <input type="radio" name="chat_provider" value="{{ p.id }}"
+             data-label="{{ p.label }}"
+             data-site="{{ p.site }}"
+             data-key-saved="{{ 'yes' if key_flags[p.id] else 'no' }}"
+             data-model="{{ settings.chat_model if settings.chat_provider == p.id else (settings.chat_models.get(p.id) or p.default_model) }}"
+             {% if settings.chat_provider == p.id %}checked{% endif %}>
+      {{ p.label }}{% if key_flags[p.id] %} - key saved{% else %} - no key saved yet{% endif %}
+    </label>
+    {% endfor %}
+
+    <label for="provider_key" id="key-label">{{ provider.label }} API key</label>
+    <input type="password" id="provider_key" name="provider_key"
+           value="" autocomplete="new-password"
+           aria-describedby="key-help"
+           placeholder="{% if key_flags[provider.id] %}A key is saved - type to replace it{% else %}Paste your key here{% endif %}">
+    <p id="key-help">
+      {% if key_flags[provider.id] %}
+      A key is saved for {{ provider.label }}. It is hidden and never shown
+      again. Leave this box empty to keep the saved key.
+      {% else %}
+      No key saved for {{ provider.label }} yet. Get one at {{ provider.site }},
+      then paste it here and press Save. It is stored only on this computer
+      and is never shown on screen again.
+      {% endif %}
+      Keys for the other providers are kept separately, so switching back
+      later does not lose them.
+    </p>
+    <p role="status" id="provider-status"></p>
+
+    {% if provider.id == "kiloworks_ai" %}
+    <label for="cloudflare_account_id">Cloudflare Account ID</label>
+    <input type="text" id="cloudflare_account_id" name="cloudflare_account_id"
+           value="{{ settings.get('cloudflare_account_id', '') }}"
+           aria-describedby="cloudflare-account-help">
+    <p id="cloudflare-account-help">
+      Your Cloudflare account ID is required for Workers AI.
+      Find it at dash.cloudflare.com (Account Home > right sidebar).
+    </p>
+    {% endif %}
+
+    <label for="chat_model">Chat model name</label>
+    <input type="text" id="chat_model" name="chat_model"
+           value="{{ settings.chat_model }}" list="model-options"
+           aria-describedby="model-help">
+    <datalist id="model-options">
+      {% for m in models %}
+      <option value="{{ m.id }}" data-free="{{ 'yes' if m.free else 'no' }}">{{ m.label }}</option>
+      {% endfor %}
+    </datalist>
+    <label>
+      <input type="checkbox" id="free-only">
+      Only show free models in the list above
+    </label>
+    <p role="status" id="filter-status"></p>
+    <p id="model-help">
+      The model name must belong to the provider you picked above: a
+      Groq name will not work on OpenCode Zen, and so on. Typing a few
+      letters of the name shows matching suggestions. If a name is
+      rejected, copy the current one from the provider's website.
+    </p>
+
+    <label>
+      <input type="checkbox" name="web_search"
+             {% if settings.web_search %}checked{% endif %}>
+      Web search - let the model look things up online
+    </label>
+    <p>Web search is an extra that only OpenRouter offers. With any
+    other provider this switch is ignored. It adds outside information
+    to an answer, so turn it off when you only want what is in your own
+    documents.</p>
+    <label>
+      <input type="checkbox" name="rerank" {% if settings.rerank %}checked{% endif %}>
+      Rerank - re-sort search results for better accuracy
+    </label>
+    <label>
+      <input type="checkbox" name="chat_fallback_enabled"
+             {% if settings.chat_fallback_enabled %}checked{% endif %}>
+      Chat fallback - automatically try other providers if the current one fails
+    </label>
+    <p>When enabled, failed chat requests will automatically try the next available provider.</p>
+    <label>
+      <input type="checkbox" name="search_fallback_enabled"
+             {% if settings.search_fallback_enabled %}checked{% endif %}>
+      Local search fallback - automatically try other providers if search provider fails
+    </label>
+    <p>When enabled, failed local search requests will automatically try the next available provider.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Maintenance</legend>
+    <label>
+      <input type="checkbox" name="rescan_timer"
+             {% if settings.rescan_timer %}checked{% endif %}>
+      Daily rescan - check the folders for new documents every day
+    </label>
+    <label>
+      <input type="checkbox" name="verbose" {% if settings.verbose %}checked{% endif %}>
+      Verbose logging - write detailed lines to the debug log
+    </label>
+  </fieldset>
+
+  <button type="submit">Save settings</button>
+</form>
+<script>
+(function () {
+  var box = document.getElementById("free-only");
+  var list = document.getElementById("model-options");
+  var status = document.getElementById("filter-status");
+  if (!box || !list || !status) {
+    return;
+  }
+  var options = Array.prototype.slice.call(list.querySelectorAll("option"));
+  function apply() {
+    var showAll = !box.checked;
+    options.forEach(function (option) {
+      var isFree = option.getAttribute("data-free") === "yes";
+      option.hidden = !showAll && !isFree;
+    });
+    var visible = options.filter(function (o) { return !o.hidden; }).length;
+    status.textContent =
+      "Showing " + visible + " of " + options.length +
+      " model suggestions.";
+  }
+  box.addEventListener("change", apply);
+  apply();
+})();
+
+(function () {
+  var radios = document.querySelectorAll('input[name="chat_provider"]');
+  var keyLabel = document.getElementById("key-label");
+  var keyInput = document.getElementById("provider_key");
+  var keyHelp = document.getElementById("key-help");
+  var modelInput = document.getElementById("chat_model");
+  var status = document.getElementById("provider-status");
+  if (!radios.length || !keyLabel || !keyInput || !keyHelp || !modelInput || !status) {
+    return;
+  }
+  var savedHelp =
+    "Keys for the other providers are kept separately, so switching " +
+    "back later does not lose them.";
+  modelInput.addEventListener("input", function () {
+    modelInput.setAttribute("data-touched", "yes");
+  });
+  function apply(radio) {
+    var label = radio.getAttribute("data-label");
+    var site = radio.getAttribute("data-site");
+    var saved = radio.getAttribute("data-key-saved") === "yes";
+    keyLabel.textContent = label + " API key";
+    keyInput.placeholder = saved
+      ? "A key is saved - type to replace it"
+      : "Paste your key here";
+    if (saved) {
+      keyHelp.textContent =
+        "A key is saved for " + label +
+        ". It is hidden and never shown again. Leave this box empty to " +
+        "keep the saved key. " + savedHelp;
+    } else {
+      keyHelp.textContent =
+        "No key saved for " + label + " yet. Get one at " + site +
+        ", then paste it here and press Save. It is stored only on this " +
+        "computer and is never shown on screen again. " + savedHelp;
+    }
+    if (modelInput.getAttribute("data-touched") !== "yes") {
+      modelInput.value = radio.getAttribute("data-model") || "";
+    }
+    status.textContent =
+      label + " selected. " +
+      (saved ? "A key is saved for it." : "No key saved for it yet.") +
+      " Model name " + modelInput.value + ".";
+  }
+  Array.prototype.forEach.call(radios, function (radio) {
+    radio.addEventListener("change", function () {
+      apply(radio);
+    });
+  });
+})();
+</script>
+{% endblock %}
