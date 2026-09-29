@@ -32,16 +32,11 @@ PROVIDERS: dict[str, dict] = {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "site": "console.groq.com/keys",
         "supports_web_search": False,
-        "default_model": "llama-3.3-70b-versatile",
+        "default_model": "qwen/qwen3.8-27b",
         "models": [
             {
-                "id": "llama-3.3-70b-versatile",
-                "label": "Groq: good all-round answers",
-                "free": False,
-            },
-            {
-                "id": "llama-3.1-8b-instant",
-                "label": "Groq: fastest, shorter answers",
+                "id": "qwen/qwen3.8-27b",
+                "label": "Groq: fast, good all-round answers, paid per use",
                 "free": False,
             },
             {
@@ -58,26 +53,11 @@ PROVIDERS: dict[str, dict] = {
         "url": "https://integrate.api.nvidia.com/v1/chat/completions",
         "site": "build.nvidia.com",
         "supports_web_search": False,
-        "default_model": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "default_model": "openai/gpt-oss-20b",
         "models": [
             {
-                "id": "nvidia/llama-3.1-nemotron-70b-instruct",
-                "label": "NVIDIA NIM: good all-round answers",
-                "free": False,
-            },
-            {
-                "id": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-                "label": "NVIDIA NIM: slower, more thorough",
-                "free": False,
-            },
-            {
-                "id": "mistralai/mistral-large-2-instruct",
-                "label": "NVIDIA NIM: strong writing, longer answers",
-                "free": False,
-            },
-            {
-                "id": "deepseek-ai/deepseek-v4.1-flash",
-                "label": "NVIDIA NIM: fast and light",
+                "id": "openai/gpt-oss-20b",
+                "label": "NVIDIA NIM: the model confirmed working on this account",
                 "free": False,
             },
         ],
@@ -96,46 +76,73 @@ PROVIDERS: dict[str, dict] = {
                 "label": "Zen free: keeps no copy of your text, never trains on it",
                 "free": True,
             },
+        ],
+    },
+    "kilo_code": {
+        "id": "kilo_code",
+        "label": "Kilo Code",
+        "env": "KILO_CODE_API_KEY",
+        "url": "https://api.kilocode.org/v1/chat/completions",
+        "site": "kilocode.org",
+        "supports_web_search": False,
+        "default_model": "kilocode/llama-3.1-8b-instruct",
+        "models": [
             {
-                "id": "longcat-2.5-preview-free",
-                "label": "Zen free: keeps no copy of your text, never trains on it",
+                "id": "kilocode/llama-3.1-8b-instruct",
+                "label": "Kilo Code: Llama 3.1 8B instruction-tuned model",
+                "free": False,
+            },
+            {
+                "id": "kilocode/mistral-7b-instruct",
+                "label": "Kilo Code: Mistral 7B instruction-tuned model",
+                "free": False,
+            },
+            {
+                "id": "kilocode/phi-3.5-mini",
+                "label": "Kilo Code: Phi-3.5 Mini (smaller, faster model)",
+                "free": False,
+            },
+            {
+                "id": "kilocode/llama-3.1-8b-instruct-free",
+                "label": "Kilo Code: Llama 3.1 8B (free version)",
+                "free": True,
+            },
+        ],
+    },
+    "kiloworks_ai": {
+        "id": "kiloworks_ai",
+        "label": "Cloudflare Workers AI",
+        "env": "CLOUDFLARE_WORKERS_AI_API_KEY",
+        "url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}",
+        "site": "cloudflare.com/ai",
+        "supports_web_search": False,
+        "default_model": "@cf/gemma-2b-it-q4k",
+        "models": [
+            {
+                "id": "@cf/gemma-2b-it-q4k",
+                "label": "Cloudflare Workers AI: Gemma 2B instruction-tuned",
                 "free": True,
             },
             {
-                "id": "mimo-v2.6-flash-free",
-                "label": "Zen free: your text may be used to improve the model",
+                "id": "@cf/llama-3.1-8b-instruct-q4k",
+                "label": "Cloudflare Workers AI: Llama 3.1 8B instruction-tuned",
                 "free": True,
             },
             {
-                "id": "mimo-v2.5-free",
-                "label": "Zen free: your text may be used to improve the model",
-                "free": True,
+                "id": "@cf/mistral-7b-instruct-q4k",
+                "label": "Cloudflare Workers AI: Mistral 7B instruction-tuned",
+                "free": False,
             },
             {
-                "id": "ling-3.0-flash-fin-free",
-                "label": "Zen free: your text may be used to improve the model",
-                "free": True,
-            },
-            {
-                "id": "big-pickle",
-                "label": "Zen free: your text may be used to improve the model",
-                "free": True,
-            },
-            {
-                "id": "nemotron-3-ultra-free",
-                "label": "Zen free: trial only - do not send private documents",
-                "free": True,
-            },
-            {
-                "id": "nemotron-3.5-lightning-free",
-                "label": "Zen free: trial only - do not send private documents",
+                "id": "@cf/phi-3.5-mini-free",
+                "label": "Cloudflare Workers AI: Phi-3.5 Mini (free)",
                 "free": True,
             },
         ],
     },
 }
 
-PROVIDER_ORDER = ("openrouter", "groq", "nim", "zen")
+PROVIDER_ORDER = ("openrouter", "groq", "nim", "zen", "kilo_code", "kiloworks_ai")
 
 
 def get_provider(provider_id: str | None) -> dict:

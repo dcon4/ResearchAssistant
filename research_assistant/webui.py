@@ -150,12 +150,13 @@ def api_ask():
     if not question:
         return jsonify({"ok": False, "error": "Please send a question."}), 400
     model = str(data.get("model") or "").strip() or None
+    provider = str(data.get("provider") or "").strip() or None
     raw_history = data.get("history")
     history = raw_history if isinstance(raw_history, list) else None
     logger.log("WebUI", f"API question received: {question[:120]}")
     from research_assistant.answer import ask as answer_ask
 
-    result = answer_ask(question, model=model, history=history)
+    result = answer_ask(question, model=model, history=history, provider=provider)
     sources = [
         {
             "file": source.file_path,
@@ -173,6 +174,7 @@ def api_ask():
             "question": result["question"],
             "answer": result["answer"],
             "model": result["model"],
+            "provider": result["provider"],
             "history": result["history"],
             "sources": sources,
             "error": result["error"],
@@ -240,7 +242,14 @@ def settings_page():
     settings = load_settings()
     message = None
     if request.method == "POST":
-        for key in ("verbose", "web_search", "rescan_timer", "rerank"):
+        for key in (
+            "verbose",
+            "web_search",
+            "rescan_timer",
+            "rerank",
+            "chat_fallback_enabled",
+            "search_fallback_enabled",
+        ):
             settings[key] = request.form.get(key) == "on"
         mode = request.form.get("embedding_mode")
         if mode in ("local", "openrouter"):
@@ -268,6 +277,11 @@ def settings_page():
         settings["chat_provider"] = provider["id"]
         settings.setdefault("chat_models", {})[provider["id"]] = model
         settings["chat_model"] = model
+        cloudflare_account_id = (
+            request.form.get("cloudflare_account_id") or ""
+        ).strip()
+        if cloudflare_account_id:
+            settings["cloudflare_account_id"] = cloudflare_account_id
         save_settings(settings)
         logger.set_verbose(settings["verbose"])
         logger.log(
@@ -316,4 +330,4 @@ def serve() -> None:
     host = settings["host"]
     port = int(settings["port"])
     logger.log("WebUI", f"Serving on http://{host}:{port}")
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False, threaded=True)

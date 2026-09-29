@@ -654,12 +654,13 @@ def test_api_ask_passes_the_chosen_model(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_ask(question, model=None, history=None):
+    def fake_ask(question, model=None, history=None, provider=None):
         seen["model"] = model
         return {
             "question": question,
             "answer": "Answer [1].",
             "model": model or "default-model",
+            "provider": "openrouter",
             "history": [],
             "sources": [],
             "error": None,
@@ -696,11 +697,12 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
         stage="bm25",
     )
 
-    def fake_ask(question, model=None, history=None):
+    def fake_ask(question, model=None, history=None, provider=None):
         return {
             "question": question,
             "answer": "Answer [1].",
             "model": "m",
+            "provider": "openrouter",
             "history": [],
             "sources": [source],
             "error": None,
@@ -880,11 +882,12 @@ def test_source_excerpt_matches_the_web_page(tmp_path, monkeypatch):
     from research_assistant import answer
     from research_assistant.search import Source
 
-    def fake_ask(question, model=None, history=None):
+    def fake_ask(question, model=None, history=None, provider=None):
         return {
             "question": question,
             "answer": "a",
             "model": "m",
+            "provider": "openrouter",
             "history": [],
             "sources": [
                 Source("/x/Ebooks/long.epub", "Chapter One", "y" * 900, 1.0, "bm25"),
@@ -960,12 +963,13 @@ def test_api_accepts_history_and_returns_what_it_kept(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_ask(question, model=None, history=None):
+    def fake_ask(question, model=None, history=None, provider=None):
         captured["history"] = history
         return {
             "question": question,
             "answer": "ok",
             "model": "m",
+            "provider": "openrouter",
             "history": answer._trim_history(history),
             "sources": [],
             "error": None,
@@ -1012,6 +1016,15 @@ def test_ask_retries_when_the_model_service_is_busy(isolated_index, monkeypatch)
 
     monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
     monkeypatch.setattr(answer, "RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(
+        answer,
+        "load_settings",
+        lambda: {
+            "chat_model": "space-bunny-free",
+            "chat_provider": "zen",
+            "web_search": False,
+        },
+    )
     conn = store.connect()
     store.insert_chunks(conn, "/x/doc.txt", [("p1", "Vioxx damaged hearts")])
     conn.commit()

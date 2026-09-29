@@ -21,9 +21,13 @@ DEFAULTS = {
     "chat_model": "nvidia/nemotron-3-super-120b-a12b:free",
     "chat_provider": "openrouter",
     "chat_models": {},
+    "cloudflare_account_id": "",
     "rerank": False,
     "host": "0.0.0.0",
     "port": 8642,
+    "chat_fallback_enabled": True,
+    "search_fallback_enabled": True,
+    "fallback_provider_order": [],
 }
 
 

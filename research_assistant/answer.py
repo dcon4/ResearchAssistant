@@ -1,10 +1,12 @@
 import re
 import time
 
+import requests
+
 from research_assistant import logger
 from research_assistant.config import load_settings
 from research_assistant.embed import api_key
-from research_assistant.providers import get_provider
+from research_assistant.providers import PROVIDER_ORDER, PROVIDERS, get_provider
 from research_assistant.search import Source, document_key, search
 
 SEARCH_CANDIDATES = 60
@@ -32,6 +34,90 @@ NON_TRANSIENT_WORDS = (
     "not supported",
     "invalid api key",
 )
+
+
+class CircuitBreaker:
+    """Tracks provider failures and prevents repeated calls to failing providers."""
+
+    def __init__(self, cooldown_seconds: int = 300):
+        self.cooldown_seconds = cooldown_seconds
+        self._failure_times: dict[str, float] = {}
+        self._success_counts: dict[str, int] = {}
+        self._failure_counts: dict[str, int] = {}
+
+    def record_success(self, provider_id: str) -> None:
+        self._success_counts[provider_id] = self._success_counts.get(provider_id, 0) + 1
+        # Reset failure count on success
+        self._failure_counts[provider_id] = 0
+        self._failure_times.pop(provider_id, None)
+
+    def record_failure(self, provider_id: str) -> None:
+        import time
+
+        self._failure_times[provider_id] = time.time()
+        self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
+
+    def is_available(self, provider_id: str) -> bool:
+        import time
+
+        if provider_id not in self._failure_times:
+            return True
+        if self._failure_counts.get(provider_id, 0) < 3:
+            return True
+        elapsed = time.time() - self._failure_times[provider_id]
+        return elapsed >= self.cooldown_seconds
+
+    def get_stats(self, provider_id: str) -> dict:
+        return {
+            "successes": self._success_counts.get(provider_id, 0),
+            "failures": self._failure_counts.get(provider_id, 0),
+            "is_available": self.is_available(provider_id),
+        }
+
+
+_circuit_breaker = CircuitBreaker()
+
+
+def get_fallback_order(settings: dict, current_provider: str) -> list[str]:
+    """Get the ordered list of providers to try as fallbacks."""
+    custom_order = settings.get("fallback_provider_order", [])
+    if custom_order:
+        # Filter to only valid providers
+        return [p for p in custom_order if p in PROVIDERS]
+    # Default: all providers except current, in PROVIDER_ORDER
+    return [
+        p
+        for p in PROVIDER_ORDER
+        if p != PROVIDERS.get(current_provider, {}).get("id", "")
+    ]
+
+
+def has_valid_key(provider_id: str) -> bool:
+    """Check if a provider has a valid API key configured."""
+    return api_key(provider_id) is not None
+
+
+def get_fallback_order_with_keys(settings: dict, current_provider: str) -> list[str]:
+    """Get the ordered list of providers that have valid API keys."""
+    fallback_order = get_fallback_order(settings, current_provider)
+    return [pid for pid in fallback_order if has_valid_key(pid)]
+
+
+def build_provider_url(provider: dict, model_id: str, settings: dict) -> str:
+    """Build the provider URL, handling template variables like Cloudflare's account_id."""
+    url = provider["url"]
+    if "{account_id}" in url:
+        account_id = settings.get("cloudflare_account_id", "").strip()
+        if not account_id:
+            raise RuntimeError(
+                "Cloudflare Workers AI requires an account ID. Set it in Settings."
+            )
+        url = url.replace("{account_id}", account_id)
+    if "{model}" in url:
+        url = url.replace("{model}", model_id)
+    return url
+
+
 HISTORY_LIMIT = 3
 HISTORY_ANSWER_CHARS = 2000
 SYSTEM_PROMPT = (
@@ -160,9 +246,27 @@ def _select_sources(sources: list[Source]) -> list[Source]:
     return kept
 
 
-def ask(question: str, model: str | None = None, history: list | None = None) -> dict:
+def ask(
+    question: str,
+    model: str | None = None,
+    history: list | None = None,
+    provider: str | None = None,
+) -> dict:
     settings = load_settings()
     model_id = (model or "").strip() or settings["chat_model"]
+    # The app sends only a model name. Work out which provider owns that
+    # model so a choice made in A.R.Y.A lands on the right service; when
+    # the model is unknown or absent, keep the provider set here.
+    provider_id = settings["chat_provider"]
+    if model_id:
+        for candidate_id in PROVIDER_ORDER:
+            if any(m["id"] == model_id for m in PROVIDERS[candidate_id]["models"]):
+                provider_id = candidate_id
+                break
+    explicit_provider = (provider or "").strip()
+    if explicit_provider in PROVIDERS:
+        provider_id = explicit_provider
+    provider = get_provider(provider_id)
     turns = _trim_history(history)
     search_text = _search_text(question, turns)
     if turns:
@@ -181,6 +285,8 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
         "question": question,
         "answer": None,
         "model": model_id,
+        "provider": provider_id,
+        "provider_label": provider["label"],
         "history": turns,
         "sources": sources,
         "error": None,
@@ -192,22 +298,18 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
         )
         logger.log("Answer", "No sources found for question")
         return result
-    provider = get_provider(settings["chat_provider"])
     key = api_key(provider["id"])
     if not key:
-        result["error"] = (
-            f"Passages were found, but no {provider['label']} API key is set, "
-            "so a written answer cannot be produced yet. Open Settings and "
-            "paste your key into the key box."
-        )
         logger.log(
             "Answer",
-            f"No {provider['label']} API key; returning passages only",
+            f"No {provider['label']} API key; will try fallback providers",
         )
-        return result
-    try:
-        import requests
 
+    def try_provider(provider: dict, model_id: str, settings: dict) -> str | None:
+        """Try to get an answer from a single provider. Returns answer text or None if failed."""
+        key = api_key(provider["id"])
+        if not key:
+            return None
         payload = {
             "model": model_id,
             "messages": [
@@ -219,65 +321,148 @@ def ask(question: str, model: str | None = None, history: list | None = None) ->
             ],
             "temperature": 0.2,
         }
-        if settings.get("web_search") and provider["supports_web_search"]:
+        if settings.get("web_search") and provider.get("supports_web_search"):
             payload["plugins"] = [{"id": "web", "max_results": 5}]
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         }
+        url = build_provider_url(provider, model_id, settings)
         attempts = 1 + len(RETRY_DELAYS)
-        last_error: Exception = RuntimeError("model did not answer")
-        answer_text: str | None = None
         for attempt in range(attempts):
             if attempt:
                 time.sleep(RETRY_DELAYS[attempt - 1])
             try:
                 response = requests.post(
-                    provider["url"], headers=headers, json=payload, timeout=180
+                    url, headers=headers, json=payload, timeout=180
                 )
             except requests.exceptions.RequestException as exc:
-                last_error = exc
                 logger.log(
                     "Answer",
-                    f"Network problem, attempt {attempt + 1}/{attempts}: {exc}",
+                    f"Network problem with {provider['label']}, attempt {attempt + 1}/{attempts}: {exc}",
                 )
+                if any(
+                    marker in str(exc)
+                    for marker in (
+                        "Name or service not known",
+                        "Failed to resolve",
+                        "NameResolutionError",
+                        "getaddrinfo failed",
+                    )
+                ):
+                    return None
                 continue
             if response.status_code in TRANSIENT_CODES:
-                last_error = RuntimeError(
-                    f"model returned {response.status_code}: {response.text[:300]}"
-                )
                 logger.log(
                     "Answer",
-                    f"Model busy ({response.status_code}), "
-                    f"attempt {attempt + 1}/{attempts}",
+                    f"Model busy ({response.status_code}), attempt {attempt + 1}/{attempts}",
                 )
                 continue
             if response.status_code != 200:
-                raise RuntimeError(
-                    f"model returned {response.status_code}: {response.text[:300]}"
+                logger.log(
+                    "Answer",
+                    f"Model returned {response.status_code}: {response.text[:300]}",
                 )
+                return None
             data = response.json()
             if "error" in data:
                 if _is_transient(data["error"]):
-                    last_error = RuntimeError(str(data["error"])[:300])
                     logger.log(
                         "Answer",
-                        f"Model busy, attempt {attempt + 1}/{attempts}: "
-                        f"{str(data['error'])[:120]}",
+                        f"Model busy, attempt {attempt + 1}/{attempts}: {str(data['error'])[:120]}",
                     )
                     continue
-                raise RuntimeError(str(data["error"])[:300])
+                logger.log(
+                    "Answer",
+                    f"Model error: {str(data['error'])[:300]}",
+                )
+                return None
             answer_text = data["choices"][0]["message"]["content"].strip()
-            break
-        if answer_text is None:
-            raise last_error
-        result["answer"] = _normalize_citations(answer_text, len(sources))
+            return answer_text
+        return None
+
+    # Determine if fallback is enabled for this context
+    is_search_context = (
+        bool(turns) or False
+    )  # If there are turns, it's a follow-up (search context)
+    fallback_enabled = settings.get(
+        "search_fallback_enabled" if is_search_context else "chat_fallback_enabled",
+        True,
+    )
+
+    # Get fallback order
+    current_provider_id = provider["id"]
+    fallback_order = (
+        get_fallback_order_with_keys(settings, current_provider_id)
+        if fallback_enabled
+        else []
+    )
+    providers_to_try = [provider] + [
+        get_provider(pid)
+        for pid in fallback_order
+        if _circuit_breaker.is_available(pid)
+    ]
+
+    answer_text: str | None = None
+    attempted = False
+    breaker_skipped = 0
+
+    for candidate in providers_to_try:
+        if not _circuit_breaker.is_available(candidate["id"]):
+            logger.log(
+                "Answer", f"Skipping {candidate['label']} (circuit breaker open)"
+            )
+            breaker_skipped += 1
+            continue
+        if not api_key(candidate["id"]):
+            logger.log("Answer", f"Skipping {candidate['label']} (no API key)")
+            continue
+        if candidate["id"] == current_provider_id:
+            candidate_model = model_id
+        else:
+            candidate_model = (
+                settings.get("chat_models", {}).get(candidate["id"])
+                or candidate["default_model"]
+            )
+        attempted = True
         logger.log(
             "Answer",
-            f"Answer produced ({len(result['answer'])} chars, "
-            f"model {model_id}, provider {provider['label']})",
+            f"Trying provider: {candidate['label']} (model {candidate_model})",
         )
-    except Exception as exc:
-        result["error"] = f"The model could not answer: {exc}"
-        logger.log("Answer", f"Chat failed: {exc}")
+        answer_text = try_provider(candidate, candidate_model, settings)
+        if answer_text is not None:
+            _circuit_breaker.record_success(candidate["id"])
+            result["provider"] = candidate["id"]
+            result["provider_label"] = candidate["label"]
+            result["model"] = candidate_model
+            break
+        _circuit_breaker.record_failure(candidate["id"])
+
+    if answer_text is None:
+        if breaker_skipped and not attempted:
+            result["error"] = (
+                "The model services are busy or failed recently. Wait a "
+                "few minutes and try again."
+            )
+            logger.log("Answer", "All providers skipped (circuit breaker)")
+        elif not attempted:
+            result["error"] = (
+                "Passages were found, but no provider has an API key set, "
+                "so a written answer cannot be produced yet. Open Settings "
+                "and paste your key into the key box."
+            )
+            logger.log("Answer", "No keyed provider available; passages only")
+        else:
+            result["error"] = (
+                "The answer could not be produced just now. Every available "
+                "model service failed or was busy. Try again in a minute."
+            )
+            logger.log("Answer", "All providers failed")
+        return result
+
+    result["answer"] = _normalize_citations(answer_text, len(sources))
+    logger.log(
+        "Answer",
+        f"Answer produced ({len(result['answer'])} chars, model {model_id})",
+    )
     return result
