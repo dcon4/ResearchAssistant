@@ -239,11 +239,20 @@ def test_search_returns_sources_without_vectors(isolated_index, tmp_path):
     assert "Solar panels" in sources[0].text
 
 
-def test_answer_without_api_key_returns_passages(isolated_index, tmp_path, monkeypatch):
+def test_private_failure_returns_passages(isolated_index, tmp_path, monkeypatch):
     from research_assistant import answer
     from research_assistant.answer import ask
 
     monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        answer,
+        "load_settings",
+        lambda: {
+            "chat_model": "gemma3:1b",
+            "chat_provider": "local",
+            "private_folder": str(tmp_path),
+        },
+    )
     conn = store.connect()
     store.insert_chunks(
         conn,
@@ -253,10 +262,10 @@ def test_answer_without_api_key_returns_passages(isolated_index, tmp_path, monke
     conn.commit()
     conn.close()
 
-    result = ask("which planet is closest to the sun")
+    result = ask("which planet is closest to the sun", scope="private")
     assert result["answer"] is None
     assert result["sources"]
-    assert "API key" in result["error"]
+    assert "local model" in result["error"]
 
 
 def test_vec_table_dim_check_is_idempotent(isolated_index):
@@ -433,6 +442,7 @@ def test_saving_key_via_settings_writes_env(tmp_path, monkeypatch):
         data={
             "verbose": "on",
             "embedding_mode": "local",
+            "chat_provider": "openrouter",
             "provider_key": "sk-or-from-form-abc",
         },
         follow_redirects=True,
@@ -659,7 +669,7 @@ def test_api_ask_passes_the_chosen_model(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_ask(question, model=None, history=None, provider=None):
+    def fake_ask(question, model=None, history=None, provider=None, scope="public"):
         seen["model"] = model
         return {
             "question": question,
@@ -690,6 +700,75 @@ def test_api_ask_passes_the_chosen_model(tmp_path, monkeypatch):
     assert data["model"] == "default-model"
 
 
+def test_api_ask_passes_the_scope(tmp_path, monkeypatch):
+    from research_assistant import answer
+
+    seen = {}
+
+    def fake_ask(question, model=None, history=None, provider=None, scope="public"):
+        seen["scope"] = scope
+        return {
+            "question": question,
+            "answer": "ok",
+            "model": "m",
+            "provider": "local",
+            "scope": scope,
+            "history": [],
+            "sources": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+
+    data = client.post(
+        "/api/ask", json={"question": "q", "scope": "private"}
+    ).get_json()
+    assert seen["scope"] == "private"
+    assert data["scope"] == "private"
+
+    data = client.post("/api/ask", json={"question": "q"}).get_json()
+    assert seen["scope"] == "public"
+    assert data["scope"] == "public"
+
+    data = client.post(
+        "/api/ask", json={"question": "q", "scope": "nonsense"}
+    ).get_json()
+    assert seen["scope"] == "public"
+
+
+def test_web_form_submits_the_scope(tmp_path, monkeypatch):
+    from research_assistant import answer
+
+    seen = {}
+
+    def fake_ask(question, scope="public", **kwargs):
+        seen["scope"] = scope
+        return {
+            "question": question,
+            "answer": "ok",
+            "model": "m",
+            "provider": "local",
+            "provider_label": "Local model (this computer)",
+            "scope": scope,
+            "history": [],
+            "sources": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(answer, "ask", fake_ask)
+    client = _api_client(tmp_path, monkeypatch)
+
+    page = client.post("/ask", data={"question": "q", "scope": "private"})
+    assert page.status_code == 200
+    assert seen["scope"] == "private"
+    assert b"answered locally on this PC" in page.data
+
+    page = client.post("/ask", data={"question": "q", "scope": "public"})
+    assert page.status_code == 200
+    assert seen["scope"] == "public"
+
+
 def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
     from research_assistant import answer
     from research_assistant.search import Source
@@ -702,7 +781,7 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
         stage="bm25",
     )
 
-    def fake_ask(question, model=None, history=None, provider=None):
+    def fake_ask(question, model=None, history=None, provider=None, scope="public"):
         return {
             "question": question,
             "answer": "Answer [1].",
@@ -876,7 +955,7 @@ def test_answer_fetches_extra_candidates_before_deduplicating(tmp_path, monkeypa
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     seen = {}
 
-    def fake_search(question, limit=8):
+    def fake_search(question, limit=8, **kwargs):
         seen["limit"] = limit
         return []
 
@@ -890,7 +969,7 @@ def test_source_excerpt_matches_the_web_page(tmp_path, monkeypatch):
     from research_assistant import answer
     from research_assistant.search import Source
 
-    def fake_ask(question, model=None, history=None, provider=None):
+    def fake_ask(question, model=None, history=None, provider=None, scope="public"):
         return {
             "question": question,
             "answer": "a",
@@ -934,7 +1013,7 @@ def test_followup_search_includes_the_previous_question(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     seen = {}
 
-    def fake_search(question, limit=8):
+    def fake_search(question, limit=8, **kwargs):
         seen["query"] = question
         return []
 
@@ -971,7 +1050,7 @@ def test_api_accepts_history_and_returns_what_it_kept(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_ask(question, model=None, history=None, provider=None):
+    def fake_ask(question, model=None, history=None, provider=None, scope="public"):
         captured["history"] = history
         return {
             "question": question,
@@ -1074,7 +1153,9 @@ def test_provider_registry_is_complete():
     envs = []
     for provider_id in PROVIDER_ORDER:
         provider = PROVIDERS[provider_id]
-        assert provider["url"].startswith("https://")
+        assert provider["url"].startswith("https://") or provider["url"].startswith(
+            "http://127.0.0.1"
+        )
         assert provider["label"]
         assert provider["site"]
         assert provider["env"].endswith("_API_KEY")
@@ -1115,10 +1196,13 @@ def test_settings_offers_provider_choice_and_free_filter(tmp_path, monkeypatch):
     assert b'name="chat_provider"' in page.data
     assert b'value="groq"' in page.data
     assert b'value="zen"' in page.data
+    assert b'value="local"' in page.data
     assert b'id="free-only"' in page.data
     assert b'data-free="yes"' in page.data
     assert b'data-free="no"' in page.data
     assert b'name="provider_key"' in page.data
+    assert b"Local search" in page.data
+    assert b"Private search" in page.data
 
 
 def test_switching_provider_keeps_its_own_model_name(tmp_path, monkeypatch):
@@ -1176,7 +1260,9 @@ def test_keys_are_kept_separately_for_each_provider(tmp_path, monkeypatch):
     assert text.count("OPENCODE_API_KEY=") == 1
 
 
-def test_answer_posts_to_the_selected_provider(isolated_index, monkeypatch):
+def test_private_search_never_sends_documents_to_a_cloud_provider(
+    isolated_index, monkeypatch
+):
     from research_assistant import answer, store
 
     monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
@@ -1187,10 +1273,11 @@ def test_answer_posts_to_the_selected_provider(isolated_index, monkeypatch):
             "chat_model": "space-bunny-free",
             "chat_provider": "zen",
             "web_search": True,
+            "private_folder": "/x/Keep",
         },
     )
     conn = store.connect()
-    store.insert_chunks(conn, "/x/doc.txt", [("p1", "Vioxx damaged hearts")])
+    store.insert_chunks(conn, "/x/Keep/secret.txt", [("p1", "Vioxx damaged hearts")])
     conn.commit()
     conn.close()
 
@@ -1209,9 +1296,152 @@ def test_answer_posts_to_the_selected_provider(isolated_index, monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr("requests.post", fake_post)
+    result = answer.ask("what drug damaged hearts", scope="private")
+
+    assert result["error"] is None
+    assert seen["url"] == "http://127.0.0.1:11434/v1/chat/completions"
+    assert seen["plugins"] is None
+    assert result["provider"] == "local"
+    assert result["model"] == "gemma3:1b"
+    assert result["scope"] == "private"
+
+
+def test_public_search_excludes_the_private_folder(isolated_index, monkeypatch):
+    from research_assistant import answer, store
+
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
+    monkeypatch.setattr(
+        answer,
+        "load_settings",
+        lambda: {
+            "chat_model": "space-bunny-free",
+            "chat_provider": "zen",
+            "web_search": False,
+            "private_folder": "/x/Keep",
+        },
+    )
+    conn = store.connect()
+    store.insert_chunks(conn, "/x/Keep/secret.txt", [("p1", "Vioxx damaged hearts")])
+    store.insert_chunks(conn, "/x/Documents/open.txt", [("p1", "Vioxx damaged hearts")])
+    conn.commit()
+    conn.close()
+
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Vioxx damaged hearts [1]"}}]}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
     result = answer.ask("what drug damaged hearts")
 
     assert result["error"] is None
     assert seen["url"] == "https://opencode.ai/zen/v1/chat/completions"
-    assert seen["plugins"] is None
-    assert result["model"] == "space-bunny-free"
+    assert result["provider"] == "zen"
+    assert result["scope"] == "public"
+    assert result["sources"]
+    assert all(
+        source.file_path == "/x/Documents/open.txt" for source in result["sources"]
+    )
+
+
+def test_private_search_only_returns_the_private_folder(isolated_index, monkeypatch):
+    from research_assistant import answer, store
+
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
+    monkeypatch.setattr(
+        answer,
+        "load_settings",
+        lambda: {
+            "chat_model": "gemma3:1b",
+            "chat_provider": "local",
+            "private_folder": "/x/Keep",
+        },
+    )
+    conn = store.connect()
+    store.insert_chunks(conn, "/x/Keep/secret.txt", [("p1", "Vioxx damaged hearts")])
+    store.insert_chunks(conn, "/x/Documents/open.txt", [("p1", "Vioxx damaged hearts")])
+    conn.commit()
+    conn.close()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Vioxx damaged hearts [1]"}}]}
+
+    monkeypatch.setattr("requests.post", lambda url, **kwargs: FakeResponse())
+    result = answer.ask("what drug damaged hearts", scope="private")
+
+    assert result["error"] is None
+    assert result["sources"]
+    assert all(source.file_path == "/x/Keep/secret.txt" for source in result["sources"])
+
+
+def test_private_history_is_dropped_before_a_cloud_answer(
+    isolated_index, tmp_path, monkeypatch
+):
+    from research_assistant import answer, store
+
+    monkeypatch.setattr(answer, "api_key", lambda *args, **kwargs: "test-key")
+    settings = {
+        "chat_model": "space-bunny-free",
+        "chat_provider": "zen",
+        "web_search": False,
+        "private_folder": str(tmp_path / "Keep"),
+    }
+    monkeypatch.setattr(answer, "load_settings", lambda: dict(settings))
+    conn = store.connect()
+    store.insert_chunks(
+        conn, str(tmp_path / "Keep" / "secret.txt"), [("p1", "the code is 4242")]
+    )
+    store.insert_chunks(
+        conn, str(tmp_path / "Documents" / "open.txt"), [("p1", "general notes")]
+    )
+    conn.commit()
+    conn.close()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "answer [1]"}}]}
+
+    payloads = []
+
+    def fake_post(url, **kwargs):
+        payloads.append(kwargs["json"])
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    private_result = answer.ask("what is the secret code", scope="private")
+    assert private_result["error"] is None
+    private_answer = private_result["answer"]
+    assert private_answer
+
+    payloads.clear()
+    followup = answer.ask(
+        "and the notes",
+        history=[
+            {"question": "what is the secret code", "answer": private_answer},
+            {"question": "notes please", "answer": "public answer"},
+        ],
+    )
+    assert followup["error"] is None
+    assert payloads
+    prompt = payloads[0]["messages"][1]["content"]
+    assert "4242" not in prompt
+    assert "secret code" not in prompt
+    assert "public answer" in prompt
+    assert len(followup["history"]) == 1
+    assert followup["history"][0]["question"] == "notes please"

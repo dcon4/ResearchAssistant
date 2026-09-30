@@ -17,7 +17,7 @@ CPU time; openrouter mode costs a few dollars.</p>
              {% if settings.embedding_mode == "local" %}checked{% endif %}>
       Local - free and private, slower (recommended)
     </label>
-    <label>
+    <label hidden>
       <input type="radio" name="embedding_mode" value="openrouter"
              {% if settings.embedding_mode == "openrouter" %}checked{% endif %}>
       OpenRouter - a few dollars one-time, best quality
@@ -27,7 +27,15 @@ CPU time; openrouter mode costs a few dollars.</p>
   <fieldset>
     <legend>Answering</legend>
 
-    <p>Choose where answers come from. Each one needs its own key.</p>
+    <p>There are two kinds of search. <b>Local search</b> looks through
+    your non-sensitive folders on this computer - it does not search the
+    Internet - and the answer can be written by the provider chosen
+    below. <b>Private search</b> looks only at the private folder and is
+    always answered by the local model on this PC, so that text never
+    leaves this computer.</p>
+    <p>Private search folder: <cite>{{ settings.private_folder or "not set" }}</cite></p>
+    <p>Choose where local-search answers come from. Each one needs its
+    own key.</p>
     {% for p in providers %}
     <label>
       <input type="radio" name="chat_provider" value="{{ p.id }}"

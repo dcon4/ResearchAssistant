@@ -23,6 +23,7 @@ DEFAULTS = {
     "search_fallback_enabled": True,
     "fallback_provider_order": [],
     "index_folders": [str(Path.home() / "Documents")],
+    "private_folder": "",
     "skip_files": [],
 }
 

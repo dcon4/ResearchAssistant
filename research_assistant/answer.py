@@ -1,13 +1,16 @@
+import hashlib
+import json
 import re
 import time
+from pathlib import Path
 
 import requests
 
-from research_assistant import logger
+from research_assistant import config, logger
 from research_assistant.config import load_settings
 from research_assistant.embed import api_key
 from research_assistant.providers import PROVIDER_ORDER, PROVIDERS, get_provider
-from research_assistant.search import Source, document_key, search
+from research_assistant.search import Source, document_key, is_private_path, search
 
 SEARCH_CANDIDATES = 60
 MAX_DOCUMENTS = 8
@@ -196,8 +199,69 @@ def _search_text(question: str, turns: list[dict]) -> str:
     return f"{turns[-1]['question']} {question}"
 
 
+def _fingerprint(text: str) -> str:
+    normalized = " ".join(text.split()).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_file() -> Path:
+    return config.INDEX_DIR / "private_fingerprints.json"
+
+
+def _remember_private(question: str, answer_text: str) -> None:
+    path = _fingerprint_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        known: list[str] = []
+        if path.exists():
+            known = json.loads(path.read_text(encoding="utf-8"))
+        for text in (question, answer_text):
+            if not text.strip():
+                continue
+            value = _fingerprint(text)
+            if value not in known:
+                known.append(value)
+        path.write_text(json.dumps(known[-500:]), encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        logger.log("Answer", f"Could not record private fingerprint: {exc}")
+
+
+def _known_private_fingerprints() -> set[str]:
+    path = _fingerprint_file()
+    try:
+        if path.exists():
+            return set(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def _strip_private_turns(turns: list[dict]) -> list[dict]:
+    if not turns:
+        return turns
+    known = _known_private_fingerprints()
+    if not known:
+        return turns
+    kept = [
+        turn
+        for turn in turns
+        if _fingerprint(turn["question"]) not in known
+        and _fingerprint(turn["answer"]) not in known
+    ]
+    if len(kept) != len(turns):
+        logger.log(
+            "Answer",
+            f"Removed {len(turns) - len(kept)} private conversation turn(s) "
+            "before using a cloud model",
+        )
+    return kept
+
+
 def _build_user_prompt(
-    question: str, sources: list[Source], turns: list[dict] | None = None
+    question: str,
+    sources: list[Source],
+    turns: list[dict] | None = None,
+    passage_chars: int = PASSAGE_CHARS,
 ) -> str:
     lines: list[str] = []
     if turns:
@@ -211,12 +275,14 @@ def _build_user_prompt(
     lines.append("Passages:")
     for index, source in enumerate(sources, start=1):
         lines.append(f"[{index}] {source.file_path} ({source.location})")
-        lines.append(source.text[:PASSAGE_CHARS])
+        lines.append(source.text[:passage_chars])
         lines.append("")
     return "\n".join(lines)
 
 
-def _select_sources(sources: list[Source]) -> list[Source]:
+def _select_sources(
+    sources: list[Source], max_passages: int = MAX_PASSAGES
+) -> list[Source]:
     counts: dict[str, int] = {}
     kept: list[Source] = []
 
@@ -228,7 +294,7 @@ def _select_sources(sources: list[Source]) -> list[Source]:
             return True
         counts[key] = counts.get(key, 0) + 1
         kept.append(source)
-        return len(kept) < MAX_PASSAGES
+        return len(kept) < max_passages
 
     first_pass: list[Source] = []
     second_pass: list[Source] = []
@@ -251,8 +317,11 @@ def ask(
     model: str | None = None,
     history: list | None = None,
     provider: str | None = None,
+    scope: str = "public",
 ) -> dict:
     settings = load_settings()
+    scope = "private" if scope == "private" else "public"
+    private_folder = (settings.get("private_folder") or "").strip()
     model_id = (model or "").strip() or settings["chat_model"]
     # The app sends only a model name. Work out which provider owns that
     # model so a choice made in A.R.Y.A lands on the right service; when
@@ -267,7 +336,20 @@ def ask(
     if explicit_provider in PROVIDERS:
         provider_id = explicit_provider
     provider = get_provider(provider_id)
+    if scope == "private":
+        if provider["id"] != "local":
+            logger.log(
+                "Answer",
+                f"Private search: ignoring {provider['label']}; the local "
+                f"model answers on this PC",
+            )
+        provider = get_provider("local")
+        provider_id = "local"
+    if not any(m["id"] == model_id for m in provider["models"]):
+        model_id = provider["default_model"]
     turns = _trim_history(history)
+    if scope == "public":
+        turns = _strip_private_turns(turns)
     search_text = _search_text(question, turns)
     if turns:
         logger.log(
@@ -275,11 +357,36 @@ def ask(
             f"Follow-up with {len(turns)} earlier turn(s); "
             f"searching on: {search_text[:160]}",
         )
-    sources = _select_sources(search(search_text, limit=SEARCH_CANDIDATES))
+    if scope == "private":
+        _remember_private(question, "")
+    local_mode = provider["id"] == "local"
+    candidates = search(
+        search_text,
+        limit=SEARCH_CANDIDATES,
+        scope=scope,
+        private_folder=private_folder,
+    )
+    in_private = (
+        (lambda path: is_private_path(path, private_folder))
+        if scope == "private"
+        else (lambda path: not is_private_path(path, private_folder))
+    )
+    outside = [source for source in candidates if not in_private(source.file_path)]
+    if outside:
+        logger.log(
+            "Answer",
+            f"Scope guard dropped {len(outside)} passage(s) outside the "
+            f"{scope} search scope",
+        )
+    sources = _select_sources(
+        [source for source in candidates if in_private(source.file_path)],
+        max_passages=8 if local_mode else MAX_PASSAGES,
+    )
     logger.verbose(
         "Answer",
         f"Selected {len(sources)} passages from "
-        f"{len({document_key(source) for source in sources})} documents",
+        f"{len({document_key(source) for source in sources})} documents "
+        f"(scope: {scope})",
     )
     result: dict = {
         "question": question,
@@ -287,11 +394,20 @@ def ask(
         "model": model_id,
         "provider": provider_id,
         "provider_label": provider["label"],
+        "scope": scope,
+        "answer_seconds": None,
         "history": turns,
         "sources": sources,
         "error": None,
     }
     if not sources:
+        if scope == "private" and not private_folder:
+            result["error"] = (
+                "Private search has no folder set yet. Open Settings and "
+                "choose the private folder first."
+            )
+            logger.log("Answer", "Private search requested but no private folder set")
+            return result
         result["error"] = (
             "No matching passages were found in the index. "
             "Check the status page, or re-run a scan."
@@ -316,11 +432,20 @@ def ask(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": _build_user_prompt(question, sources, turns),
+                    "content": _build_user_prompt(
+                        question,
+                        sources,
+                        turns,
+                        passage_chars=1500
+                        if provider["id"] == "local"
+                        else PASSAGE_CHARS,
+                    ),
                 },
             ],
             "temperature": 0.2,
         }
+        if provider["id"] == "local":
+            payload["max_tokens"] = 400
         if settings.get("web_search") and provider.get("supports_web_search"):
             payload["plugins"] = [{"id": "web", "max_results": 5}]
         headers = {
@@ -377,8 +502,21 @@ def ask(
                     f"Model error: {str(data['error'])[:300]}",
                 )
                 return None
-            answer_text = data["choices"][0]["message"]["content"].strip()
-            return answer_text
+            if "choices" in data:
+                answer_text = data["choices"][0]["message"]["content"].strip()
+                return answer_text
+            # Workers AI answers in its own shape: {"result": {"response": ...}}
+            result = data.get("result")
+            if isinstance(result, dict):
+                answer_text = str(result.get("response") or "").strip()
+                if answer_text:
+                    return answer_text
+            logger.log(
+                "Answer",
+                f"Unrecognised response shape from {provider['label']}: "
+                f"{str(data)[:200]}",
+            )
+            return None
         return None
 
     # Determine if fallback is enabled for this context
@@ -389,6 +527,8 @@ def ask(
         "search_fallback_enabled" if is_search_context else "chat_fallback_enabled",
         True,
     )
+    if local_mode:
+        fallback_enabled = False
 
     # Get fallback order
     current_provider_id = provider["id"]
@@ -429,16 +569,30 @@ def ask(
             "Answer",
             f"Trying provider: {candidate['label']} (model {candidate_model})",
         )
+        attempt_started = time.perf_counter()
         answer_text = try_provider(candidate, candidate_model, settings)
+        attempt_seconds = time.perf_counter() - attempt_started
         if answer_text is not None:
             _circuit_breaker.record_success(candidate["id"])
             result["provider"] = candidate["id"]
             result["provider_label"] = candidate["label"]
             result["model"] = candidate_model
+            result["answer_seconds"] = round(attempt_seconds, 1)
             break
         _circuit_breaker.record_failure(candidate["id"])
+        logger.log(
+            "Answer",
+            f"{candidate['label']} failed after {attempt_seconds:.1f}s",
+        )
 
     if answer_text is None:
+        if local_mode:
+            result["error"] = (
+                "The local model on this computer did not answer just now. "
+                "Try again in a moment."
+            )
+            logger.log("Answer", "Local model failed; no cloud fallback used (privacy)")
+            return result
         if breaker_skipped and not attempted:
             result["error"] = (
                 "The model services are busy or failed recently. Wait a "
@@ -461,8 +615,12 @@ def ask(
         return result
 
     result["answer"] = _normalize_citations(answer_text, len(sources))
+    if scope == "private":
+        _remember_private(question, result["answer"])
     logger.log(
         "Answer",
-        f"Answer produced ({len(result['answer'])} chars, model {model_id})",
+        f"Answer produced ({len(result['answer'])} chars, "
+        f"model {result['model']}, scope: {scope}, "
+        f"in {result.get('answer_seconds', '?')}s)",
     )
     return result

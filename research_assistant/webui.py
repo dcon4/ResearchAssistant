@@ -151,12 +151,16 @@ def api_ask():
         return jsonify({"ok": False, "error": "Please send a question."}), 400
     model = str(data.get("model") or "").strip() or None
     provider = str(data.get("provider") or "").strip() or None
+    scope = str(data.get("scope") or "").strip().lower()
+    scope = scope if scope == "private" else "public"
     raw_history = data.get("history")
     history = raw_history if isinstance(raw_history, list) else None
-    logger.log("WebUI", f"API question received: {question[:120]}")
+    logger.log("WebUI", f"API question received ({scope}): {question[:120]}")
     from research_assistant.answer import ask as answer_ask
 
-    result = answer_ask(question, model=model, history=history, provider=provider)
+    result = answer_ask(
+        question, model=model, history=history, provider=provider, scope=scope
+    )
     sources = [
         {
             "file": source.file_path,
@@ -175,6 +179,7 @@ def api_ask():
             "answer": result["answer"],
             "model": result["model"],
             "provider": result["provider"],
+            "scope": result.get("scope", scope),
             "history": result["history"],
             "sources": sources,
             "error": result["error"],
@@ -191,19 +196,23 @@ def home():
 @app.route("/ask", methods=["POST"])
 def ask():
     question = (request.form.get("question") or "").strip()
+    scope = (request.form.get("scope") or "").strip().lower()
+    scope = scope if scope == "private" else "public"
     settings = load_settings()
     if not question:
         return render_template(
             "ask.html", settings=settings, error="Please type a question."
         )
-    logger.log("WebUI", f"Question received: {question[:120]}")
+    logger.log("WebUI", f"Question received ({scope}): {question[:120]}")
     from research_assistant.answer import ask as answer_ask
 
-    result = answer_ask(question)
+    result = answer_ask(question, scope=scope)
     return render_template(
         "ask.html",
         settings=settings,
         question=question,
+        scope=result.get("scope", scope),
+        provider_label=result["provider_label"],
         answer=result["answer"],
         sources=result["sources"],
         error=result["error"],

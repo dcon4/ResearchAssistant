@@ -36,6 +36,12 @@ matter for this codebase:
 
 - Index database lives in `index/` on the local disk (never on the NAS).
 - Source documents are read in place from the NAS; never moved or copied.
-- Index folders are fixed to the three NAS folders in `config.py`.
+- Index folders are the NAS folders listed in `settings.json`
+  (`index_folders`): Ebooks, Documents, reports, and Keep.
+- Keep (`/mnt/ls-share/opencode/Keep`) is the private folder
+  (`private_folder` in `settings.json`). Searches run with
+  `scope="private"` look only there and answer with the local model
+  only; `scope="public"` (the default) searches the other three
+  folders and must never return a Keep path.
 - Settings persist as JSON in `settings.json` (gitignored).
 - Never commit `.env`, real API keys, `logs/`, `index/`, or `.venv/`.

@@ -231,7 +231,20 @@ def _cosine_scores(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return matrix @ query
 
 
-def search(question: str, limit: int = 8) -> list[Source]:
+def is_private_path(file_path: str, private_folder: str) -> bool:
+    if not private_folder:
+        return False
+    path = Path(file_path)
+    root = Path(private_folder)
+    return path == root or root in path.parents
+
+
+def search(
+    question: str,
+    limit: int = 8,
+    scope: str = "public",
+    private_folder: str = "",
+) -> list[Source]:
     conn = store.connect()
     try:
         hint = extract_letter_hint(question)
@@ -245,6 +258,26 @@ def search(question: str, limit: int = 8) -> list[Source]:
         info = backend_info()
         meta = store.get_embed_meta(conn)
         wanted = list(dict.fromkeys([*fts_ids, *lane_ids, *hint_ids]))
+        excluded = 0
+        if wanted:
+            paths = store.fetch_chunk_paths(conn, wanted)
+            if scope == "private":
+                allowed = {
+                    chunk_id
+                    for chunk_id, file_path in paths.items()
+                    if is_private_path(file_path, private_folder)
+                }
+            else:
+                allowed = {
+                    chunk_id
+                    for chunk_id, file_path in paths.items()
+                    if not is_private_path(file_path, private_folder)
+                }
+            excluded = len(wanted) - len(allowed)
+            fts_ids = [chunk_id for chunk_id in fts_ids if chunk_id in allowed]
+            lane_ids = [chunk_id for chunk_id in lane_ids if chunk_id in allowed]
+            hint_ids = [chunk_id for chunk_id in hint_ids if chunk_id in allowed]
+            wanted = [chunk_id for chunk_id in wanted if chunk_id in allowed]
         candidates: dict[int, float] = {}
         stage = "keyword"
         use_vectors = (
@@ -311,7 +344,8 @@ def search(question: str, limit: int = 8) -> list[Source]:
         logger.verbose(
             "Search",
             f"Query returned {len(sources)} sources "
-            f"(fts: {len(fts_ids)}, lane: {len(lane_ids)}, "
+            f"(scope: {scope}, excluded: {excluded}, "
+            f"fts: {len(fts_ids)}, lane: {len(lane_ids)}, "
             f"hint lane: {len(hint_ids)}, extras kept: {len(extras)}, "
             f"stage: {stage})",
         )

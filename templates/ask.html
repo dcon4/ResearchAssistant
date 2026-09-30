@@ -8,10 +8,22 @@
   <input type="text" id="question" name="question" value="{{ question or '' }}"
          aria-describedby="question-help" required>
   <p id="question-help">Answers will cite the file and where in the file it came from.</p>
-  <button type="submit">Ask</button>
+  <button type="submit" name="scope" value="public">
+    Local search - my documents, not the Internet
+  </button>
+  <button type="submit" name="scope" value="private">
+    Private search - my private folder, answered on this PC
+  </button>
 </form>
 {% if answer %}
 <h3>Answer</h3>
+<p>
+  {% if scope == "private" %}
+  Private search, answered locally on this PC by {{ provider_label }}.
+  {% else %}
+  Local search by {{ provider_label }}.
+  {% endif %}
+</p>
 <div class="answer">{{ answer }}</div>
 {% endif %}
 {% if sources %}

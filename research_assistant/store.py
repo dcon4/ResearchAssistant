@@ -203,6 +203,23 @@ def fetch_chunks(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple]:
     return result
 
 
+def fetch_chunk_paths(conn: sqlite3.Connection, ids: list[int]) -> dict[int, str]:
+    if not ids:
+        return {}
+    result: dict[int, str] = {}
+    step = 500
+    for start in range(0, len(ids), step):
+        batch = ids[start : start + step]
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT id, file_path FROM chunks WHERE id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            result[row[0]] = row[1]
+    return result
+
+
 def fetch_chunk_vectors(
     conn: sqlite3.Connection, ids: list[int]
 ) -> dict[int, np.ndarray]:

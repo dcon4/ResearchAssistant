@@ -109,6 +109,22 @@ PROVIDERS: dict[str, dict] = {
             },
         ],
     },
+    "local": {
+        "id": "local",
+        "label": "Local model (this computer)",
+        "env": "LOCAL_LLM_API_KEY",
+        "url": "http://127.0.0.1:11434/v1/chat/completions",
+        "site": "ollama.com",
+        "supports_web_search": False,
+        "default_model": "gemma3:1b",
+        "models": [
+            {
+                "id": "gemma3:1b",
+                "label": "Local: private, runs on this computer, nothing sent online",
+                "free": True,
+            },
+        ],
+    },
     "kiloworks_ai": {
         "id": "kiloworks_ai",
         "label": "Cloudflare Workers AI",
@@ -116,33 +132,36 @@ PROVIDERS: dict[str, dict] = {
         "url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}",
         "site": "cloudflare.com/ai",
         "supports_web_search": False,
-        "default_model": "@cf/gemma-2b-it-q4k",
+        "default_model": "@cf/meta/llama-3.1-8b-instruct-fp8",
         "models": [
             {
-                "id": "@cf/gemma-2b-it-q4k",
-                "label": "Cloudflare Workers AI: Gemma 2B instruction-tuned",
-                "free": True,
-            },
-            {
-                "id": "@cf/llama-3.1-8b-instruct-q4k",
+                "id": "@cf/meta/llama-3.1-8b-instruct-fp8",
                 "label": "Cloudflare Workers AI: Llama 3.1 8B instruction-tuned",
                 "free": True,
             },
             {
-                "id": "@cf/mistral-7b-instruct-q4k",
+                "id": "@cf/mistral/mistral-7b-instruct-v0.2-lora",
                 "label": "Cloudflare Workers AI: Mistral 7B instruction-tuned",
                 "free": False,
             },
             {
-                "id": "@cf/phi-3.5-mini-free",
-                "label": "Cloudflare Workers AI: Phi-3.5 Mini (free)",
+                "id": "@cf/meta/llama-3.2-3b-instruct",
+                "label": "Cloudflare Workers AI: Llama 3.2 3B (smaller, faster)",
                 "free": True,
             },
         ],
     },
 }
 
-PROVIDER_ORDER = ("openrouter", "groq", "nim", "zen", "kilo_code", "kiloworks_ai")
+PROVIDER_ORDER = (
+    "openrouter",
+    "groq",
+    "nim",
+    "zen",
+    "kilo_code",
+    "kiloworks_ai",
+    "local",
+)
 
 
 def get_provider(provider_id: str | None) -> dict:
