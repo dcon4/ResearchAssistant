@@ -119,6 +119,16 @@ def rescan() -> dict:
                     f"Skipped, dropped from index: {Path(skipped_path).name} "
                     f"({len(old_ids)} chunks)",
                 )
+        for missing_path in manifest.missing_files():
+            old_ids = store.delete_file_chunks(conn, missing_path)
+            if old_ids:
+                store.delete_vectors(conn, old_ids)
+            manifest.forget(missing_path)
+            logger.log(
+                "Pipeline",
+                f"Missing file, dropped from index: {Path(missing_path).name} "
+                f"({len(old_ids)} chunks)",
+            )
         conn.commit()
         pending = manifest.pending()
         indexed = 0

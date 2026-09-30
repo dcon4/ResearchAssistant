@@ -70,13 +70,17 @@ def scan() -> dict:
     changed = 0
     skipped = 0
     errors = 0
+    seen: set[str] = set()
+    walked: list[Path] = []
     for folder in INDEX_FOLDERS:
         if not folder.is_dir():
             logger.log("Manifest", f"Folder missing, skipped: {folder}")
             continue
+        walked.append(folder)
         for path in sorted(folder.rglob("*")):
             if not path.is_file():
                 continue
+            seen.add(str(path))
             suffix = path.suffix.lower()
             if suffix in SKIP:
                 skipped += 1
@@ -111,7 +115,7 @@ def scan() -> dict:
                     row
                     and row[0] == stat.st_size
                     and row[1] == stat.st_mtime
-                    and row[2] != "skipped"
+                    and row[2] not in ("skipped", "missing")
                 ):
                     unchanged += 1
                     continue
@@ -126,12 +130,27 @@ def scan() -> dict:
             except OSError as exc:
                 errors += 1
                 logger.log("Manifest", f"Cannot read {path}: {exc}")
+    missing = 0
+    for (path_str,) in conn.execute(
+        "SELECT path FROM files WHERE status != 'missing'"
+    ).fetchall():
+        if path_str in seen:
+            continue
+        candidate = Path(path_str)
+        if any(candidate.is_relative_to(folder) for folder in walked):
+            conn.execute(
+                "UPDATE files SET status = 'missing', error = NULL WHERE path = ?",
+                (path_str,),
+            )
+            missing += 1
+            logger.log("Manifest", f"Missing on disk: {path_str}")
     conn.commit()
     summary = {
         "new": found,
         "changed": changed,
         "unchanged": unchanged,
         "skipped": skipped,
+        "missing": missing,
         "errors": errors,
     }
     logger.log("Manifest", f"Scan done: {summary}")
@@ -157,6 +176,22 @@ def skipped_files() -> list[str]:
     ).fetchall()
     conn.close()
     return [row[0] for row in rows]
+
+
+def missing_files() -> list[str]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT path FROM files WHERE status = 'missing' ORDER BY path"
+    ).fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+
+def forget(path: str) -> None:
+    conn = _connect()
+    conn.execute("DELETE FROM files WHERE path = ?", (path,))
+    conn.commit()
+    conn.close()
 
 
 def mark(path: str, status: str, error: str | None = None) -> None:

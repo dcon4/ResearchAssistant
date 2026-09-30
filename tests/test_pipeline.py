@@ -1,3 +1,4 @@
+import os
 import zipfile
 from pathlib import Path
 
@@ -186,6 +187,85 @@ def test_rescan_drops_chunks_for_newly_skipped_file(
 
     assert manifest.counts()["skipped"] == 1
     assert indexed_files() == {"keep.txt"}
+
+
+def test_rescan_drops_index_for_deleted_file(tmp_path, monkeypatch, isolated_index):
+    from research_assistant import config, pipeline
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "keep.txt").write_text(
+        "These are words worth finding in the search index. " * 20, encoding="utf-8"
+    )
+    (folder / "gone.txt").write_text(
+        "These are words that will disappear from disk. " * 20, encoding="utf-8"
+    )
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"rescan_timer": false}', encoding="utf-8")
+
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(pipeline, "INDEX_DIR", tmp_path / "index")
+
+    def indexed_files() -> set[str]:
+        conn = store.connect()
+        paths = {
+            row[0].split("/")[-1]
+            for row in conn.execute("SELECT DISTINCT file_path FROM chunks")
+        }
+        conn.close()
+        return paths
+
+    assert pipeline.rescan()["indexed"] == 2
+    assert indexed_files() == {"keep.txt", "gone.txt"}
+
+    (folder / "gone.txt").unlink()
+    result = pipeline.rescan()
+
+    assert result["scan"]["missing"] == 1
+    assert indexed_files() == {"keep.txt"}
+    assert manifest.missing_files() == []
+    assert "missing" not in manifest.counts()
+
+
+def test_scan_keeps_rows_when_folder_is_unavailable(
+    tmp_path, monkeypatch, isolated_index
+):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "keep.txt").write_text("still here", encoding="utf-8")
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    manifest.scan()
+    assert manifest.counts()["new"] == 1
+
+    (folder / "keep.txt").unlink()
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [tmp_path / "unplugged"])
+    summary = manifest.scan()
+
+    assert summary["missing"] == 0
+    assert manifest.counts()["new"] == 1
+
+
+def test_missing_file_returns_to_the_index_when_restored(
+    tmp_path, monkeypatch, isolated_index
+):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "keep.txt"
+    target.write_text("content that comes back", encoding="utf-8")
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    manifest.scan()
+    before = target.stat()
+
+    target.unlink()
+    assert manifest.scan()["missing"] == 1
+
+    target.write_text("content that comes back", encoding="utf-8")
+    os.utime(target, (before.st_atime, before.st_mtime))
+    manifest.scan()
+
+    assert manifest.missing_files() == []
+    assert [record.path for record in manifest.pending()] == [str(target)]
 
 
 def test_fts_roundtrip(isolated_index, tmp_path):
