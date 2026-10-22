@@ -17,6 +17,13 @@
     .notice { background: #e0ffe0; }
     .error { background: #ffe0e0; }
     dt { font-weight: bold; margin-top: 1rem; }
+    .button-link { display: inline-block; margin-top: 1rem; margin-right: .5rem; padding: .5rem 1rem; background: #eee; border: 1px solid #999; border-radius: 4px; color: #000; text-decoration: none; font-size: 1rem; }
+    .button-link:focus, .button-link:hover { background: #ddd; text-decoration: underline; }
+    label.check { font-weight: normal; display: block; margin-top: .5rem; }
+    .results { list-style: decimal; padding-left: 1.75rem; }
+    .results > li { margin-top: 1.25rem; }
+    .jump { font-weight: bold; }
+    .reader p { white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -26,6 +33,7 @@
     <nav aria-label="Main">
       <ul>
         <li><a href="{{ url_for('home') }}">Ask</a></li>
+        <li><a href="{{ url_for('search_page') }}">Search</a></li>
         <li><a href="{{ url_for('status') }}">Index status</a></li>
         <li><a href="{{ url_for('settings_page') }}">Settings</a></li>
         <li><a href="{{ url_for('download_log') }}">Download debug log</a></li>

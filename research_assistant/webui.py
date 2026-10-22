@@ -1,3 +1,5 @@
+import io
+import re
 import threading
 from pathlib import Path
 
@@ -11,13 +13,14 @@ from flask import (
 )
 
 from research_assistant import logger, manifest, store
+from research_assistant.chunk import join_chunks
 from research_assistant.config import (
     INDEX_FOLDERS,
     PROJECT_DIR,
     load_settings,
     save_settings,
 )
-from research_assistant.search import DOC_SUFFIXES
+from research_assistant.search import DOC_SUFFIXES, allowed_chunk_ids, is_private_path
 
 app = Flask(__name__, template_folder=str(PROJECT_DIR / "templates"))
 
@@ -98,6 +101,10 @@ def _index_stats() -> dict:
 
 
 EXCERPT_CHARS = 400
+SEARCH_CANDIDATES = 100
+SEARCH_SHOWN = 25
+SNIPPET_LEAD = 120
+READER_MAX_CHARS = 500_000
 
 
 def _excerpt(text: str) -> str:
@@ -123,6 +130,52 @@ def _doc_title(file_path: str, location: str) -> str:
         if Path(tail).suffix.lower() in DOC_SUFFIXES:
             return Path(tail).stem.replace("_", " ").strip()
     return Path(file_path).stem.replace("_", " ").strip()
+
+
+def _scope_arg() -> str:
+    return "private" if request.values.get("scope") == "private" else "public"
+
+
+def _search_excerpt(text: str, query: str) -> str:
+    terms = [term for term in re.findall(r"[A-Za-z0-9']+", query) if len(term) > 1]
+    lowered = text.lower()
+    positions = [
+        position
+        for position in (lowered.find(term.lower()) for term in terms)
+        if position >= 0
+    ]
+    start = max(0, (min(positions) if positions else 0) - SNIPPET_LEAD)
+    snippet = text[start : start + EXCERPT_CHARS]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if start + EXCERPT_CHARS < len(text) else ""
+    return prefix + snippet + suffix
+
+
+def _safe_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9 ._()-]", "_", name).strip(" ._")
+    return cleaned[:80] or "chapter"
+
+
+def _reader_data(chunk_id: int, scope: str):
+    """Everything the reader and download pages need, or None when not allowed.
+
+    A missing chunk and a private chunk requested in public scope both
+    answer the same way, so guessing ids reveals nothing.
+    """
+    settings = load_settings()
+    private_folder = (settings.get("private_folder") or "").strip()
+    conn = store.connect()
+    try:
+        row = store.fetch_chunk(conn, chunk_id)
+        if row is None:
+            return None
+        file_path, location, text = row
+        if is_private_path(file_path, private_folder) and scope != "private":
+            return None
+        pieces = store.section_chunks(conn, file_path, location)
+    finally:
+        conn.close()
+    return settings, file_path, location, text, pieces
 
 
 @app.route("/api/status")
@@ -169,6 +222,7 @@ def api_ask():
             "location": source.location,
             "text": _excerpt(source.text),
             "score": round(source.score, 4),
+            "chunk_id": source.chunk_id,
         }
         for source in result["sources"]
     ]
@@ -193,10 +247,10 @@ def home():
     return render_template("ask.html", settings=settings)
 
 
-@app.route("/ask", methods=["POST"])
+@app.route("/ask", methods=["GET", "POST"])
 def ask():
-    question = (request.form.get("question") or "").strip()
-    scope = (request.form.get("scope") or "").strip().lower()
+    question = (request.values.get("question") or "").strip()
+    scope = (request.values.get("scope") or "").strip().lower()
     scope = scope if scope == "private" else "public"
     settings = load_settings()
     if not question:
@@ -217,6 +271,155 @@ def ask():
         sources=result["sources"],
         error=result["error"],
     )
+
+
+@app.route("/search")
+def search_page():
+    settings = load_settings()
+    query = (request.values.get("q") or "").strip()
+    boolean = request.values.get("boolean") == "on"
+    scope = _scope_arg()
+    private_folder = (settings.get("private_folder") or "").strip()
+    results: list[dict] = []
+    error = None
+    searched = False
+    if query:
+        searched = True
+        logger.log("WebUI", f"Search page query ({scope}): {query[:120]}")
+        conn = store.connect()
+        try:
+            if boolean:
+                try:
+                    ids = store.fts_boolean(conn, query, limit=SEARCH_CANDIDATES)
+                except ValueError as exc:
+                    error = str(exc)
+                    ids = []
+            else:
+                ids = store.fts_search(conn, query, limit=SEARCH_CANDIDATES)
+            allowed = allowed_chunk_ids(conn, ids, scope, private_folder)
+            rows = store.fetch_chunks(conn, [cid for cid in ids if cid in allowed])
+            for chunk_id in ids:
+                row = rows.get(chunk_id)
+                if not row:
+                    continue
+                file_path, location, text = row
+                results.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "title": _doc_title(file_path, location) or file_path,
+                        "file_path": file_path,
+                        "location": location,
+                        "excerpt": _search_excerpt(text, query),
+                    }
+                )
+                if len(results) >= SEARCH_SHOWN:
+                    break
+        finally:
+            conn.close()
+        if not results and not error and scope == "private" and not private_folder:
+            error = (
+                "Private search has no folder set yet. Open Settings and "
+                "choose the private folder first."
+            )
+    return render_template(
+        "search.html",
+        settings=settings,
+        query=query,
+        boolean=boolean,
+        scope=scope,
+        results=results,
+        error=error,
+        searched=searched,
+    )
+
+
+@app.route("/source/<int:chunk_id>")
+def source_view(chunk_id):
+    scope = _scope_arg()
+    data = _reader_data(chunk_id, scope)
+    if data is None:
+        abort(404)
+    settings, file_path, location, matched_text, pieces = data
+    full_text = join_chunks([text for _id, text in pieces])
+    truncated = False
+    if len(full_text) > READER_MAX_CHARS:
+        cut = full_text.rfind("\n\n", 0, READER_MAX_CHARS)
+        full_text = full_text[: cut if cut > 0 else READER_MAX_CHARS]
+        truncated = True
+    blocks = [block.strip() for block in full_text.split("\n\n") if block.strip()]
+    if not blocks and full_text.strip():
+        blocks = [full_text.strip()]
+    marker = matched_text.strip().split("\n", 1)[0][:120].strip()
+    matched_index = None
+    if marker:
+        matched_index = next(
+            (index for index, block in enumerate(blocks) if marker in block), None
+        )
+    try:
+        original_exists = Path(file_path).is_file()
+    except OSError:
+        original_exists = False
+    logger.log(
+        "WebUI",
+        f"Reader opened ({scope}): {Path(file_path).name} / {location[:80]}",
+    )
+    return render_template(
+        "source.html",
+        settings=settings,
+        scope=scope,
+        chunk_id=chunk_id,
+        title=_doc_title(file_path, location) or Path(file_path).name,
+        file_path=file_path,
+        location=location,
+        blocks=blocks,
+        matched_index=matched_index,
+        original_exists=original_exists,
+        truncated=truncated,
+    )
+
+
+@app.route("/source/<int:chunk_id>/download")
+def source_download(chunk_id):
+    scope = _scope_arg()
+    data = _reader_data(chunk_id, scope)
+    if data is None:
+        abort(404)
+    _settings, file_path, location, _matched, pieces = data
+    full_text = join_chunks([text for _id, text in pieces])
+    name = _safe_name(_doc_title(file_path, location)) + ".txt"
+    logger.log(
+        "WebUI",
+        f"Chapter download ({scope}): {Path(file_path).name} / {location[:80]}",
+    )
+    return send_file(
+        io.BytesIO(full_text.encode("utf-8")),
+        mimetype="text/plain",
+        as_attachment=True,
+        download_name=name,
+    )
+
+
+@app.route("/source/<int:chunk_id>/original")
+def source_file_download(chunk_id):
+    scope = _scope_arg()
+    data = _reader_data(chunk_id, scope)
+    if data is None:
+        abort(404)
+    settings, file_path, _location, _matched, _pieces = data
+    private_folder = (settings.get("private_folder") or "").strip()
+    roots = [Path(p) for p in settings.get("index_folders", [])]
+    if private_folder:
+        roots.append(Path(private_folder))
+    path = Path(file_path)
+    if not any(path == root or path.is_relative_to(root) for root in roots):
+        abort(404)
+    try:
+        if not path.is_file():
+            abort(404)
+    except OSError:
+        abort(404)
+    logger.log("WebUI", f"Original file download ({scope}): {path.name}")
+    return send_file(path, as_attachment=True, download_name=path.name)
 
 
 @app.route("/status")

@@ -16,6 +16,25 @@ def _split_paragraphs(text: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def join_chunks(texts: list[str]) -> str:
+    """Put a section's stored chunks back together into one text.
+
+    Chunks of one section are stored in reading order. A chunk that was
+    split from an oversized paragraph repeats up to OVERLAP_CHARS
+    characters of the chunk before it; that repeat is removed here.
+    """
+    if not texts:
+        return ""
+    merged = texts[0]
+    for following in texts[1:]:
+        shared = min(OVERLAP_CHARS, len(merged), len(following))
+        if shared and merged.endswith(following[:shared]):
+            merged += following[shared:]
+        else:
+            merged += "\n\n" + following
+    return merged
+
+
 def chunk_text(text: str, location: str) -> list[Chunk]:
     paragraphs = _split_paragraphs(text)
     chunks: list[Chunk] = []

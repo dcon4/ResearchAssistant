@@ -15,6 +15,10 @@ questions your documents cannot answer.
   and one file cannot be larger than 60 MB.
 - Builds a searchable index on this computer's hard drive. The
   documents themselves are never moved or copied.
+- Search the index directly on the **Search** page - plain words, or
+  a boolean expression - and open any result to read the whole
+  chapter or article on screen, or download it as a text file or as
+  the original file.
 - Answers your questions with an AI model from the provider of your
   choice (OpenRouter, Groq, NVIDIA NIM, OpenCode Zen, and others),
   listing which file (and page) each answer came from.
@@ -34,7 +38,16 @@ device on your network.
 
 ## The pages
 
-- **Ask** - type a question, get an answer with sources.
+- **Ask** - type a question, get an answer with sources. Each source
+  links to **Read the full chapter**.
+- **Search** - find words in your documents without an AI answer.
+  Type plain words, or tick the boolean box and write an expression
+  such as `passport AND visa`, `cat OR dog`, `recipe NOT dessert`, or
+  `"exact phrase"`. Each result opens the full chapter or article,
+  where you can read it, jump to the matched passage, download it as
+  a text file, or download the original file. PDFs are shown as their
+  indexed page range (for example "pages 1-200"), because PDFs are
+  not split by chapter.
 - **Index status** - which folders are being indexed, how far along.
 - **Settings** - choose local (free) or OpenRouter (a few dollars)
   embedding, turn web search on or off, turn verbose logging on or
@@ -149,12 +162,17 @@ Example reply:
       "title": "notes",
       "location": "page 2",
       "text": "a 400-character excerpt...",
-      "score": 0.81
+      "score": 0.81,
+      "chunk_id": 4107
     }
   ],
   "error": null
 }
 ```
+
+`chunk_id` identifies the exact passage, so an app can link to the
+reader page `/source/<chunk_id>` to show or download the full
+chapter.
 
 When something goes wrong, `ok` is `false` and `error` holds a
 plain-language message meant to be spoken or shown as-is. An empty

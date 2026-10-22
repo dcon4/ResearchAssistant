@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - Research Assistant{% endblock %}
+{% block content %}
+<h2>{{ title }}</h2>
+<p><cite>{{ file_path }}</cite> - {{ location }}</p>
+{% if matched_index is not none %}
+<p><a class="jump" href="#p{{ matched_index }}">Jump to the matched passage</a></p>
+{% endif %}
+<p>
+  <a class="button-link" href="{{ url_for('source_download', chunk_id=chunk_id, scope=scope) }}">Download this chapter as a text file</a>
+  {% if original_exists %}
+  <a class="button-link" href="{{ url_for('source_file_download', chunk_id=chunk_id, scope=scope) }}">Download the original file</a>
+  {% endif %}
+</p>
+{% if not original_exists %}
+<p>The original file is no longer on this computer, so only the text
+download is available.</p>
+{% endif %}
+{% if truncated %}
+<p>This section is very long, so only the first part is shown on this
+page. Use the download buttons above to get the whole text.</p>
+{% endif %}
+<h3>Text</h3>
+<div class="reader">
+  {% for block in blocks %}
+  <p id="p{{ loop.index0 }}">{{ block }}</p>
+  {% endfor %}
+</div>
+<p><a href="{{ url_for('search_page', scope=scope) }}">Back to search</a></p>
+{% endblock %}

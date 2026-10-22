@@ -33,6 +33,9 @@
   <li>
     <cite>{{ source.file_path }}</cite> - {{ source.location }}
     <p class="excerpt">{{ source.text[:400] }}{% if source.text|length > 400 %}...{% endif %}</p>
+    {% if source.chunk_id %}
+    <a class="button-link" href="{{ url_for('source_view', chunk_id=source.chunk_id, scope=scope or 'public') }}">Read the full chapter</a>
+    {% endif %}
   </li>
   {% endfor %}
 </ol>

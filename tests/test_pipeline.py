@@ -228,6 +228,30 @@ def test_rescan_drops_index_for_deleted_file(tmp_path, monkeypatch, isolated_ind
     assert "missing" not in manifest.counts()
 
 
+def test_rescan_never_hashes_whole_files(tmp_path, monkeypatch, isolated_index):
+    from research_assistant import config, pipeline
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "big.txt"
+    target.write_text("content that matters " * 50, encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"rescan_timer": false}', encoding="utf-8")
+
+    monkeypatch.setattr(manifest, "INDEX_FOLDERS", [folder])
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(pipeline, "INDEX_DIR", tmp_path / "index")
+
+    def boom(path):
+        raise AssertionError(f"rescan tried to hash a whole file: {path}")
+
+    monkeypatch.setattr(manifest, "_hash_file", boom)
+    assert pipeline.rescan()["indexed"] == 1
+
+    os.utime(target, (0, 0))
+    assert pipeline.rescan()["scan"]["changed"] == 1
+
+
 def test_scan_keeps_rows_when_folder_is_unavailable(
     tmp_path, monkeypatch, isolated_index
 ):
@@ -886,6 +910,7 @@ def test_api_ask_serialises_sources_for_speech(tmp_path, monkeypatch):
             "location": "notes/summary.txt",
             "text": "body",
             "score": 0.5,
+            "chunk_id": 0,
         }
     ]
 

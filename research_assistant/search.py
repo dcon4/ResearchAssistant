@@ -216,6 +216,7 @@ class Source:
     score: float
     stage: str
     lane: bool = False
+    chunk_id: int = 0
 
 
 def document_key(source: Source) -> str:
@@ -239,6 +240,24 @@ def is_private_path(file_path: str, private_folder: str) -> bool:
     return path == root or root in path.parents
 
 
+def allowed_chunk_ids(
+    conn: sqlite3.Connection, chunk_ids: list[int], scope: str, private_folder: str
+) -> set[int]:
+    """The chunk ids the given search scope is allowed to see."""
+    paths = store.fetch_chunk_paths(conn, chunk_ids)
+    if scope == "private":
+        return {
+            chunk_id
+            for chunk_id, file_path in paths.items()
+            if is_private_path(file_path, private_folder)
+        }
+    return {
+        chunk_id
+        for chunk_id, file_path in paths.items()
+        if not is_private_path(file_path, private_folder)
+    }
+
+
 def search(
     question: str,
     limit: int = 8,
@@ -260,19 +279,7 @@ def search(
         wanted = list(dict.fromkeys([*fts_ids, *lane_ids, *hint_ids]))
         excluded = 0
         if wanted:
-            paths = store.fetch_chunk_paths(conn, wanted)
-            if scope == "private":
-                allowed = {
-                    chunk_id
-                    for chunk_id, file_path in paths.items()
-                    if is_private_path(file_path, private_folder)
-                }
-            else:
-                allowed = {
-                    chunk_id
-                    for chunk_id, file_path in paths.items()
-                    if not is_private_path(file_path, private_folder)
-                }
+            allowed = allowed_chunk_ids(conn, wanted, scope, private_folder)
             excluded = len(wanted) - len(allowed)
             fts_ids = [chunk_id for chunk_id in fts_ids if chunk_id in allowed]
             lane_ids = [chunk_id for chunk_id in lane_ids if chunk_id in allowed]
@@ -339,6 +346,7 @@ def search(
                     score=score,
                     stage=stage,
                     lane=chunk_id in priority_ids,
+                    chunk_id=chunk_id,
                 )
             )
         logger.verbose(

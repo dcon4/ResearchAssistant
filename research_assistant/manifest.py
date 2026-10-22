@@ -108,7 +108,7 @@ def scan() -> dict:
                     skipped += 1
                     continue
                 row = conn.execute(
-                    "SELECT size, mtime, status FROM files WHERE path = ?",
+                    "SELECT size, mtime, status, sha256 FROM files WHERE path = ?",
                     (str(path),),
                 ).fetchone()
                 if (
@@ -119,7 +119,10 @@ def scan() -> dict:
                 ):
                     unchanged += 1
                     continue
-                sha = _hash_file(path)
+                # Size and mtime decide whether a file changed. Hashing a
+                # whole file just to store a digest that is never compared
+                # would mean re-reading multi-gigabyte books on every scan.
+                sha = row[3] if row else ""
                 status = "new"
                 if row:
                     status = "changed"

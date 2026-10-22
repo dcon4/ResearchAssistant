@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Search - Research Assistant{% endblock %}
+{% block content %}
+<h2>Search the index</h2>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="get" action="{{ url_for('search_page') }}">
+  <label for="q">Words to find</label>
+  <input type="text" id="q" name="q" value="{{ query or '' }}"
+         aria-describedby="q-help" required>
+  <p id="q-help">Each result opens the full chapter or article, where you can
+  read it or download it. No AI answer is produced - this is a plain search.</p>
+  <label class="check" for="boolean">
+    <input type="checkbox" id="boolean" name="boolean"{% if boolean %} checked{% endif %}>
+    Use boolean search: combine words with AND, OR, NOT, or put an
+    &quot;exact phrase&quot; in quotes
+  </label>
+  <button type="submit" name="scope" value="public">
+    Search my documents
+  </button>
+  <button type="submit" name="scope" value="private">
+    Search the private folder
+  </button>
+</form>
+{% if searched %}
+  {% if results %}
+  <h3>{{ results|length }} result{% if results|length != 1 %}s{% endif %}</h3>
+  <ol class="results">
+    {% for result in results %}
+    <li>
+      <a href="{{ url_for('source_view', chunk_id=result.chunk_id, scope=scope) }}">{{ result.title }}</a>
+      <p><cite>{{ result.file_path }}</cite> - {{ result.location }}</p>
+      <p class="excerpt">{{ result.excerpt }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  {% elif not error %}
+  <p>No matches found. Try different words{% if boolean %}, or check the
+  boolean expression{% endif %}.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -21,6 +21,10 @@ def connect() -> sqlite3.Connection:
         )"""
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS chunks_file_location_idx "
+        "ON chunks(file_path, location)"
+    )
+    conn.execute(
         """CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             text, file_path, location, tokenize='porter'
         )"""
@@ -150,6 +154,45 @@ def fts_search(conn: sqlite3.Connection, query: str, limit: int = 500) -> list[i
         logger.log("Store", f"FTS query failed: {exc}")
         return []
     return [row[0] for row in rows]
+
+
+def fts_boolean(
+    conn: sqlite3.Connection, expression: str, limit: int = 100
+) -> list[int]:
+    """Run a boolean search (AND, OR, NOT, "exact phrase") as written."""
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (expression, limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError(
+            "That boolean search could not be understood. Check the "
+            "spelling, the quotes, and the AND / OR / NOT words. "
+            f"(The search engine said: {exc})"
+        ) from exc
+    return [row[0] for row in rows]
+
+
+def section_chunks(
+    conn: sqlite3.Connection, file_path: str, location: str
+) -> list[tuple[int, str]]:
+    """All chunks of one section (chapter / member / page range), in reading order."""
+    rows = conn.execute(
+        "SELECT id, text FROM chunks WHERE file_path = ? AND location = ? ORDER BY id",
+        (file_path, location),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def fetch_chunk(conn: sqlite3.Connection, chunk_id: int) -> tuple[str, str, str] | None:
+    row = conn.execute(
+        "SELECT file_path, location, text FROM chunks WHERE id = ?", (chunk_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0], row[1], row[2]
 
 
 def fts_match(conn: sqlite3.Connection, match: str, limit: int = 200) -> list[int]:
