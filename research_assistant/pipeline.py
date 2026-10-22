@@ -5,7 +5,13 @@ from pathlib import Path
 from research_assistant import logger, manifest, store
 from research_assistant.chunk import chunk_text
 from research_assistant.config import INDEX_DIR, load_settings
-from research_assistant.embed import backend_info, cached_embedder
+from research_assistant.embed import (
+    EMBED_BATCH,
+    EMBED_PARALLEL,
+    EMBED_SLICE,
+    backend_info,
+    cached_embedder,
+)
 from research_assistant.extract import extract
 
 
@@ -67,17 +73,35 @@ def embed_pending(conn) -> tuple[int, int]:
             f"now say {info['mode']}. Run 'reembed' to rebuild vectors."
         )
     store.ensure_vec_table(conn, info["dim"])
-    rows = conn.execute(
-        "SELECT c.id, c.text FROM chunks c "
+    total = conn.execute(
+        "SELECT COUNT(*) FROM chunks c "
         "LEFT JOIN chunks_vec v ON v.rowid = c.id WHERE v.rowid IS NULL"
-    ).fetchall()
-    if not rows:
+    ).fetchone()[0]
+    if not total:
         logger.verbose("Embed", "No chunks need embeddings")
         return 0, 0
     embedder = cached_embedder(info["mode"])
+    # One embed call feeds every parallel model process several full
+    # batches: worker processes start once per call, so the slice must be
+    # well above (processes x batch) to keep start-up cost small.
+    slice_size = EMBED_SLICE or (
+        EMBED_PARALLEL * EMBED_BATCH if EMBED_PARALLEL else EMBED_BATCH
+    )
     done = 0
-    for start in range(0, len(rows), 32):
-        batch = rows[start : start + 32]
+    last_id = 0
+    while done < total:
+        # Walk forward by chunk id instead of holding every pending text
+        # in memory: a 1M-chunk backlog would otherwise cost gigabytes.
+        batch = conn.execute(
+            "SELECT c.id, c.text FROM chunks c "
+            "LEFT JOIN chunks_vec v ON v.rowid = c.id "
+            "WHERE v.rowid IS NULL AND c.id > ? "
+            "ORDER BY c.id LIMIT ?",
+            (last_id, slice_size),
+        ).fetchall()
+        if not batch:
+            break
+        last_id = batch[-1][0]
         try:
             vectors = embedder.embed([text for _id, text in batch])
         except Exception as exc:
@@ -86,17 +110,17 @@ def embed_pending(conn) -> tuple[int, int]:
         store.insert_vectors(conn, [row[0] for row in batch], vectors)
         conn.commit()
         done += len(batch)
-        logger.verbose("Embed", f"Embedded {done}/{len(rows)} chunks")
-    if done and done == len(rows):
+        logger.verbose("Embed", f"Embedded {done}/{total} chunks")
+    if done and done == total:
         store.set_embed_meta(conn, info["model"], info["dim"], info["mode"])
         conn.commit()
     elif done:
         logger.log(
             "Embed",
-            f"Embedding incomplete ({done}/{len(rows)}); "
+            f"Embedding incomplete ({done}/{total}); "
             "search will stay keyword-only until a full run finishes",
         )
-    return done, len(rows)
+    return done, total
 
 
 def rescan() -> dict:

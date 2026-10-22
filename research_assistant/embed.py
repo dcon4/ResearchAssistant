@@ -8,7 +8,17 @@ from research_assistant.config import PROJECT_DIR, load_settings
 OPENROUTER_EMBED_URL = "https://openrouter.ai/api/v1/embeddings"
 OPENROUTER_EMBED_MODEL = "baai/bge-m3"
 LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
-EMBED_BATCH = 64
+# How many texts go through the model in one go. Bigger batches use the
+# CPU cores more efficiently; tune with the EMBED_BATCH environment
+# variable (research-assistant.service sets it).
+EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "64")) or 64
+# How many model processes embed side by side (fastembed's data-parallel
+# mode, one core each). 0 or missing means a single process.
+EMBED_PARALLEL = int(os.environ.get("EMBED_PARALLEL", "0")) or None
+# How many texts one embed call submits in total. Pool workers start up
+# once per call, so this must be a multiple of (parallel x batch) to keep
+# that start-up cost small. 0 or missing = one batch per call.
+EMBED_SLICE = int(os.environ.get("EMBED_SLICE", "0")) or 0
 
 
 def _env_name(provider: str | None) -> str:
@@ -78,11 +88,24 @@ class LocalEmbedder:
     def __init__(self) -> None:
         from fastembed import TextEmbedding
 
-        self.model = TextEmbedding(LOCAL_MODEL)
+        # Use the cores this process is allowed to run on (set by systemd
+        # CPUAffinity), not the machine total. Politeness to Web2Ebook is
+        # handled by pinning; here we just fill the cores we are given.
+        try:
+            cpu = len(os.sched_getaffinity(0))
+        except AttributeError:
+            cpu = os.cpu_count() or 2
+        threads = int(os.environ.get("EMBED_THREADS", "0")) or max(1, cpu)
+        logger.verbose(
+            "Embed", f"Local model using {threads} threads (of {cpu} allowed)"
+        )
+        self.model = TextEmbedding(LOCAL_MODEL, threads=threads)
         self.dim = 384
 
     def embed(self, texts: list[str]) -> np.ndarray:
-        vectors = list(self.model.embed(texts, batch_size=EMBED_BATCH))
+        vectors = list(
+            self.model.embed(texts, batch_size=EMBED_BATCH, parallel=EMBED_PARALLEL)
+        )
         array = np.array(vectors, dtype=np.float32)
         return _normalize(array)
 
